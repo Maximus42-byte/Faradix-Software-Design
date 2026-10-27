@@ -4,9 +4,9 @@
 | --- | --- |
 | Product | Modular Faradix water-electrolyzer equipment, local control runtime, and customer web platform |
 | Document version | 0.1 |
-| Status | Proposed architecture; documentation baseline |
+| Status | Proposed target architecture with an implemented local-development customer web shell |
 | Prepared | 2026-10-27 |
-| Implementation status | No software implementation is present in this repository |
+| Implementation status | React/TypeScript/Vite frontend and FastAPI fixture API implemented; no equipment runtime or live integration |
 | Basis | Supplied Faradix architecture context and the previously reviewed module-design draft |
 
 This is a self-contained repository document. It preserves the supplied architectural principles and distinguishes them from proposed internal designs and unresolved engineering choices. Version 0.1 identifies this document, not a software release or a finalized industrial design.
@@ -23,12 +23,12 @@ The final sensor inventory, actuator inventory, I/O topology, communication prot
 
 | Horizon | Scope |
 | --- | --- |
-| Current work | Update `README.md` and `ARCHITECTURE_v0.1.md` only; the repository contains documentation, with no runtime or web implementation. |
-| First planned implementation | Demonstrate an end-to-end closed loop against a virtual electrolyzer. |
+| Current repository | Runnable local-development customer web shell and read-only fixture API; no real authentication, telemetry, billing, or subscriptions. |
+| Next local-control milestone | Demonstrate an end-to-end closed loop against a virtual electrolyzer. |
 | Subsequent engineering | Integrate validated models, real device adapters, measured timing requirements, hardware-specific procedures, and the customer web platform. |
 | Future capabilities | Advanced optimization, calibration workflows, additional customer services, external integration, digital-twin interoperability, and optional ML assistance. |
 
-Code scaffolding, dependency installation, build systems, CI/CD, containers, cloud deployment, and real hardware operation are outside the current documentation milestone. Future capabilities listed here are not commitments to implement them immediately.
+The present shell adds `frontend/`, `backend/`, local dependencies, a frontend lockfile, and focused customer-access tests. It does not add a database, cloud deployment, live telemetry, authentication, payment handling, or real hardware operation. Future capabilities listed here are not commitments to implement them immediately.
 
 ## 2. Architectural baseline
 
@@ -48,7 +48,7 @@ These principles define the architecture's intended behavior. This document does
 
 ## 3. Logical system architecture
 
-The three system parts have distinct failure and authority boundaries. Physical equipment includes dedicated independent safety functions. Local software near each equipment installation owns the control loop. The central platform receives asynchronous telemetry and serves authorized customer web views; it does not host the mandatory fast loop.
+The three system parts have distinct failure and authority boundaries. Physical equipment includes dedicated independent safety functions. Planned local software near each equipment installation owns the control loop. The target central platform will receive asynchronous telemetry and serve authorized customer web views; it does not host the mandatory fast loop. The diagram below shows the proposed target, not the current fixture-only data flow.
 
 ```mermaid
 flowchart TD
@@ -99,7 +99,7 @@ flowchart TD
 
 The model and policy remain separate collaborators in local decision-making. The fast feedback path supplies low-level control independently of slower estimation, optimization, telemetry export, and the central platform. Telemetry carries stable device identity and is mapped to customer ownership before the backend exposes it to a customer's panel. A customer may have several devices grouped by installation when that concept is useful.
 
-Telemetry export is asynchronous and bounded. Cloud or billing unavailability cannot stall local control. Any future remote-command path is separate from telemetry and requires backend authorization, a local admission interface, and local supervisory checks; no browser or billing service writes actuator commands.
+Telemetry export is intended to be asynchronous and bounded. Cloud or billing unavailability cannot stall local control. Neither export nor local control is implemented in this shell. Any future remote-command path is separate from telemetry and requires backend authorization, a local admission interface, and local supervisory checks; no browser or billing service writes actuator commands.
 
 For software-only development, a virtual electrolyzer replaces the physical plant behind the device interface. A simulated safety model can exercise software scenarios; it is distinct from the independent safety hardware required for the real plant.
 
@@ -263,7 +263,9 @@ The central platform may be unavailable while local control continues. Transport
 
 **Responsibility:** manage customer-visible devices and installations, receive telemetry, retain history and alarms, and serve authorized monitoring and subscription-enabled services through a web application.
 
-**Proposed internals:** telemetry ingestion, device registry, customer-scoped data storage, alarm and history queries, backend access checks, feature-entitlement checks, and a customer web API. The web application is the current customer-interface direction; its framework remains provisional.
+**Proposed internals:** telemetry ingestion, device registry, customer-scoped data storage, alarm and history queries, backend access checks, feature-entitlement checks, and a customer web API.
+
+**Implemented shell:** `frontend/` uses React, TypeScript, and Vite for Overview, My Devices, Device Details, and Subscription. `backend/` uses FastAPI for `/api/v1/health`, `/me`, `/devices`, `/devices/{device_id}`, and `/subscription`. The browser reads fixture inventory from this API. Overview counts and integration summaries are derived from those responses; device telemetry and history are explicitly empty. The header checks backend health, and the browser remains navigable if the API is unavailable. There is no telemetry ingestion, alarm history, persistent storage, operational command route, or real subscription service.
 
 Incoming telemetry is associated with authenticated device identity and its current customer ownership before data becomes visible in the appropriate customer's panel. The platform is not responsible for the mandatory fast control loop. Possible paid services include extended history, analytics, reports, or remote support; these are examples, not committed subscription-plan contents.
 
@@ -275,6 +277,8 @@ Incoming telemetry is associated with authenticated device identity and its curr
 
 Every platform read and action must resolve the user's authority over the referenced device and data. Group membership is useful for navigation and aggregation but cannot replace device-level ownership checks. The exact tenancy and role model remains open.
 
+**Implemented development boundary:** a single replaceable FastAPI dependency selects `demo-customer-01` on the server. Fixtures contain two customers and devices for both; list and detail routes return only the selected customer's devices, using the same `404` for unknown and other-customer IDs. Browser-supplied customer IDs do not confer authority. This is fixture scoping, not authentication or a production tenant-security design. The shell is not ready for public deployment.
+
 ### 4.19 Subscription plans and feature entitlements
 
 **Responsibility:** represent subscription state and decide which optional platform services a customer may use.
@@ -283,17 +287,19 @@ Every platform read and action must resolve the user's authority over the refere
 
 The included feature set, paid feature set, charging basis, grace-period behavior, and relationship between entitlements and optimization capabilities are undecided. Entitlement checks stay outside the time-critical local control path. Expiry must not disable independent hardware safety or abruptly interrupt basic local control; treatment of optional remote services requires a defined lifecycle policy.
 
+**Implemented shell:** `/api/v1/subscription` returns `not_configured`. There are no plan records, active subscriptions, feature-entitlement rules, or expiry behavior.
+
 ### 4.20 Billing integration
 
 **Responsibility:** exchange subscription and payment state with a billing provider while keeping commercial transactions separate from device operation and entitlement policy.
 
 **Proposed internals:** provider adapter, event reconciliation, idempotent state updates, and failure reporting. Payment provider, currencies, pricing, and billing intervals have not been chosen.
 
-A billing outage must not become a control-loop dependency. The subscription lifecycle must define how stale or missing billing events affect optional services, including offline and grace periods, without impairing independent safety or basic local control.
+A billing outage must not become a control-loop dependency. The subscription lifecycle must define how stale or missing billing events affect optional services, including offline and grace periods, without impairing independent safety or basic local control. No billing adapter or payment flow is implemented in the shell.
 
 ## 5. Shared domain contracts
 
-The following are proposed conceptual contracts, not finalized C++, database, or Protocol Buffers schemas. Serialization, identifiers, precision, units, and compatibility rules remain design tasks.
+The following are proposed conceptual target contracts, not finalized C++, database, or Protocol Buffers schemas. Serialization, identifiers, precision, units, and compatibility rules remain design tasks. The current FastAPI Pydantic response models cover only health, the development customer, fixture devices, and an unconfigured subscription status; they do not implement these target domain contracts.
 
 | Contract | Minimum information | Key meaning |
 | --- | --- | --- |
@@ -349,7 +355,7 @@ Remote operational commands are not a committed product feature. If offered late
 
 ### 7.1 Proposed execution arrangement
 
-A reasonable starting point is a modular local C++ runtime near the equipment, with separate execution paths for fast I/O/control, state/supervisory work, and bounded optimization jobs. Supporting local API, storage, and telemetry-export work remains outside the control cycle. The central customer web platform is a separate system, not the location of the mandatory fast loop. Module calls within a local process do not need network RPC.
+A reasonable future starting point is a modular local C++ runtime near the equipment, with separate execution paths for fast I/O/control, state/supervisory work, and bounded optimization jobs. Supporting local API, storage, and telemetry-export work remains outside the control cycle. The central customer web platform is a separate system, not the location of the mandatory fast loop. Module calls within a local process do not need network RPC. The current repository instead runs local-only Vite and FastAPI development servers, both bound to `127.0.0.1`.
 
 Use coherent snapshots, bounded queues, and a target mailbox with explicit ownership and synchronization. A thread separation alone does not isolate process crashes, memory corruption, resource exhaustion, or all scheduling interference. Consider a separate worker process when Python integration, blocking libraries, or fault-isolation requirements justify it.
 
@@ -401,7 +407,7 @@ flowchart TD
 
 The architecture target is to change device bindings without rewriting the core's domain logic. Real integration will still require appropriate configuration, capability mapping, timing validation, and hardware-specific behavior.
 
-The first planned software milestone will demonstrate:
+The next planned local-control milestone will demonstrate:
 
 - A complete command/measurement loop through the simulator and core modules.
 - Distinct optimizer proposals, accepted targets, and actuator commands.
@@ -410,7 +416,7 @@ The first planned software milestone will demonstrate:
 - Continued bounded control when non-critical consumers are slow or unavailable.
 - Sufficient event and version context to investigate a decision or transition.
 
-These are future acceptance goals, not test results. Use repeatable scenarios and varied plant/model parameters; a successful loop using identical models is not evidence of physical accuracy or hardware safety. Later platform validation must also test customer data isolation, device ownership mapping, backend entitlements, and local control during cloud or billing outages.
+These are future local-control acceptance goals, not test results. Use repeatable scenarios and varied plant/model parameters; a successful loop using identical models is not evidence of physical accuracy or hardware safety. Current backend tests cover fixture ownership scoping only. Later platform validation must test real authentication, customer data isolation, device ownership mapping, backend entitlements, and local control during cloud or billing outages.
 
 ## 9. Configuration and decision traceability
 
@@ -422,15 +428,15 @@ A model calibration workflow produces a reviewed candidate bundle. A configurati
 
 ## 10. Provisional technology direction
 
-These are candidates retained from the project discussion, not installed dependencies or finalized requirements.
+FastAPI, React, TypeScript, and Vite are implemented in the local customer shell. Other entries remain candidates for later equipment and platform work, not installed dependencies or finalized requirements.
 
 | Area | Current direction | Decision still needed |
 | --- | --- | --- |
 | Core, adapters, estimation, control | C++20 or C++23 | Toolchain, supported standard, and hardware constraints. |
 | Research, fitting, offline analysis | Python | Boundary between experimental and deployed components. |
 | Optimization | Simple initial approach; CasADi and acados/generated code as future candidates | Problem formulation, solver budget, licensing and deployment fit. |
-| Central platform API | FastAPI as a candidate | Backend authorization, customer isolation, and actual API/process boundaries. |
-| Customer web application | React and TypeScript as candidates | Customer workflows and minimum required views; Qt desktop is not an agreed requirement. |
+| Central platform API | FastAPI implemented for the local fixture API | Real authentication, authorization model, persistence, and production API boundaries. |
+| Customer web application | React, TypeScript, and Vite implemented for the development shell | Production hosting, customer workflows, and integration; Qt desktop is not an agreed requirement. |
 | Storage | PostgreSQL; optional time-series extension or partitioning | Ingestion volume, retention, and query requirements. |
 | Cross-process API | gRPC and Protocol Buffers where needed | Whether an RPC boundary is justified for each connection. |
 | Field/industrial communication | EtherCAT, Modbus, CAN, OPC UA or vendor interfaces | Actual devices, topology, and timing requirements. |
@@ -438,10 +444,10 @@ These are candidates retained from the project discussion, not installed depende
 | Subscription and billing services | No provider or implementation selected | Plan contents, charging basis, lifecycle policy, payment provider, currencies, and billing intervals. |
 | Edge execution | Linux; possible PREEMPT_RT | Measured timing needs and deployment qualification. |
 | Safety | Independent safety controller/PLC or equivalent design | Hardware hazard analysis and protective-function requirements. |
-| Build and validation | CMake, GoogleTest, pytest as applicable | Implementation scope and useful test boundaries. |
+| Build and validation | Vite build and pytest implemented for the shell; CMake and GoogleTest are later candidates | Equipment implementation scope and useful test boundaries. |
 | Deployment | Native control runtime; containers considered for supporting services | Isolation and operational requirements. |
 
-No component is selected merely because it appears in this table. In particular, a service mesh, Kubernetes deployment, distributed microservices, advanced ML, and a full digital twin are not initial architectural requirements.
+Only FastAPI, React, TypeScript, Vite, and the focused shell test dependencies are selected by the current implementation. Other entries remain provisional. A service mesh, Kubernetes deployment, distributed microservices, advanced ML, and a full digital twin are not initial architectural requirements.
 
 ## 11. Open decisions
 
@@ -468,8 +474,6 @@ These are decisions to resolve with relevant software, hardware, and modeling co
 
 ## 12. Incremental documentation workflow
 
-For the current milestone, maintain only `README.md` and `ARCHITECTURE_v0.1.md`. Keep diagrams self-contained in Markdown so the baseline does not require image assets or a documentation toolchain.
+Keep `README.md` and this architecture document synchronized with the implemented shell and with later architectural decisions. The README gives exact local setup and startup commands; this document separates current fixture behavior from the proposed physical, local-control, and central-platform target.
 
-Review changes in small, meaningful Git commits. Each revision should state the problem or decision it addresses and keep the introduction, diagrams, module responsibilities, and open-decision list consistent. A documentation revision does not imply implementation progress.
-
-New source code, build files, dependencies, tests, workflows, deployment files, or additional project scaffolding belong to an explicitly requested later milestone. Branch names, remotes, repository visibility, licensing, and the timing of pushes are repository-management decisions outside this architectural baseline.
+The web shell does not imply implementation progress in hardware safety, local control, telemetry ingestion, authentication, entitlements, or billing. Future revisions should update responsibilities, interfaces, assumptions, and open decisions as those capabilities are specified and built. Branch names, remotes, repository visibility, licensing, and push timing remain repository-management decisions outside this architectural baseline.

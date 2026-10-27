@@ -2,88 +2,91 @@
 
 Faradix sells modular physical water-electrolyzer products with local control software and a customer-facing web platform. Customers may own multiple devices or installations. Faradix also sells recurring software-service subscriptions; plan contents, pricing, billing intervals, and payment providers are undecided.
 
-- **Project stage:** architecture and system design.
-- **Current repository state:** documentation only; no equipment-control runtime, web platform, simulator, or billing implementation is present.
+- **Current repository state:** a runnable local-development customer web shell and fixture-backed API are implemented. The equipment-control runtime, live telemetry, authentication, and commercial integrations are not.
 - **Architecture document version:** 0.1, proposed. This is a document version, not a software release.
 
-## Purpose and system boundaries
+## System boundaries
 
-The proposed system has three connected parts:
+The product architecture has three connected parts:
 
-1. **Physical equipment and independent hardware safety:** modular electrolyzer devices, their sensors and actuators, and protective functions that remain effective independently of application software.
-2. **Local C++ control runtime near the equipment:** device access, acquisition, state estimation, modeling, policy, optimization, supervisory admission, and time-sensitive control. C++ is the current core-runtime direction; the implementation and hardware details remain to be decided.
-3. **Central customer web platform:** device and installation management, remote monitoring, history, alarms, customer/user access, and subscription-enabled services. A web application is the current customer-interface direction; a Qt desktop application is not an agreed requirement.
+1. **Physical equipment and independent hardware safety:** modular electrolyzer devices, their sensors and actuators, and protective functions independent of application software.
+2. **Local C++ control runtime near the equipment:** planned device access, acquisition, state estimation, modeling, policy, optimization, supervisory admission, and time-sensitive control. This runtime is not implemented in this repository.
+3. **Central customer web platform:** customer-scoped device management, remote monitoring, history, alarms, and subscription-enabled services. This repository implements only an initial read-only development shell of that platform.
 
-The electrolyzer hardware is still under development. Sensor types, actuators, communication protocols, operating ranges, control periods, and the detailed physics model have not been finalized.
+The proposed telemetry path is asynchronous from local equipment software to the central platform. The platform associates device identity with customer ownership before exposing data to the appropriate customer. No telemetry path or equipment-control link is implemented yet. Any future remote-command path must be separate from telemetry and pass backend authorization and local supervisory admission; this shell has no operational commands.
 
-## Architecture overview
+Independent hardware safety and basic local control must not depend on cloud availability, subscription expiry, or billing-service availability. Modeling, policy, optimization, supervisory control, and real-time control remain distinct planned local responsibilities. See [ARCHITECTURE_v0.1.md](ARCHITECTURE_v0.1.md) for the proposed architecture and open decisions.
 
-```mermaid
-flowchart TD
-    plant["Modular physical electrolyzers"]
-    safety["Independent hardware safety"]
-    local["Local C++ control runtime"]
-    ingest["Central telemetry ingestion"]
-    registry["Device identity and customer ownership"]
-    history["Device history and alarms"]
-    entitlements["Backend subscription entitlements"]
-    access["Backend customer authorization"]
-    web["Customer web application"]
-    billing["Separate billing integration"]
+## Implemented development shell
 
-    plant <-->|measurements and actuation| local
-    plant -->|dedicated safety inputs| safety
-    safety -->|protective actions| plant
-    local -->|asynchronous device telemetry| ingest
-    registry -->|device identity and ownership| ingest
-    ingest -->|validated records| history
-    registry -->|authorized device scope| access
-    history -->|device data| access
-    billing -->|subscription events| entitlements
-    entitlements -->|optional service decisions| access
-    access <-->|authorized customer views| web
+| Part | Present behavior |
+| --- | --- |
+| `frontend/` | React, TypeScript, and Vite customer workspace with Overview, My Devices, Device Details, and Subscription pages. It shows loading, empty, not-found, and API-unavailable states. |
+| `backend/` | FastAPI versioned read-only API for health, the current development customer, authorized device inventory and details, and subscription integration status. |
+| Development fixtures | Two customers and three device records exist on the server. The default development customer sees only its two devices. Every device is labeled as a development fixture with telemetry integration pending. |
+
+Overview counts and integration summaries come from API responses. Device Details show identity and installation information when present, with explicit empty telemetry and history sections. Subscription reports **Not configured**. No sensor readings, hydrogen production, physical connection states, active subscriptions, payments, or optimization results are fabricated.
+
+### API endpoints
+
+| Endpoint | Response |
+| --- | --- |
+| `GET /api/v1/health` | Backend availability and development-demo status. |
+| `GET /api/v1/me` | Current server-side development customer. |
+| `GET /api/v1/devices` | Devices owned by that customer. |
+| `GET /api/v1/devices/{device_id}` | One owned device, or `404` for unknown and other-customer IDs. |
+| `GET /api/v1/subscription` | `not_configured`; no subscription or billing records. |
+
+## Run locally
+
+The setup was verified with Node.js 22.23.2 and Python 3.10.12. Vite also supports Node.js 20.19+ or 22.12+. From the repository root, create the local Python environment and install backend dependencies:
+
+```bash
+python3 -m venv backend/.venv
+backend/.venv/bin/python -m pip install -r backend/requirements.txt
 ```
 
-Telemetry is associated with device identity and customer ownership before it appears in the appropriate customer's web panel. The diagram shows monitoring, not remote control. Whether remote operational commands will be offered is unresolved; any future command path must use backend authorization and local supervisory admission, with no direct browser or billing-service access to actuators.
+Start the API in one terminal:
 
-## Design principles
+```bash
+cd backend
+.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
 
-- Keep hard safety independent of the main application, cloud platform, and billing services.
-- Keep basic local control operating through cloud disconnection. Subscription expiry or a billing outage must not disable independent safety or abruptly interrupt basic local control.
-- Route optimizer proposals and operator requests through supervisory control; neither directly controls actuators.
-- Separate device access, data acquisition, state estimation, modeling, policy, optimization, and control.
-- Use compatible contracts for simulated devices and real hardware adapters.
-- Keep time-sensitive control independent of blocking database, UI, cloud, billing, entitlement, and optimization work.
-- Restrict each customer and user to authorized devices and data. The platform backend enforces subscription entitlements; hiding web controls alone is insufficient.
-- Begin with a modular local core and a simulated closed loop. Add deployment complexity when a concrete requirement justifies it.
+Start the frontend in another terminal, from the repository root:
 
-## Customer services and open product decisions
+```bash
+cd frontend
+npm ci
+npm run dev
+```
 
-The central platform is intended to associate devices with customers and, where useful, installations or device groups. It will manage user access, telemetry, history, alarms, and subscription entitlements. Billing integration supports subscription records but stays separate from the time-critical equipment-control path.
+Open the web application at **http://127.0.0.1:5173/**. The API health endpoint is **http://127.0.0.1:8000/api/v1/health**; the local API reference is at **http://127.0.0.1:8000/docs**. Vite proxies `/api` requests to the local API. Both development servers bind to `127.0.0.1`. The frontend header checks actual backend health and remains navigable when the API is unavailable.
 
-Extended history, analytics, reports, and remote support are examples of possible paid services, not committed plan contents. It is undecided which features are included, how subscriptions are charged, what happens during expiry or offline periods, how historical data remains accessible after expiry, whether remote commands are offered, and which payment providers, currencies, and billing intervals to use. Optimization capabilities have not been assigned to any subscription tier.
+For focused backend tests, install the development dependencies, then run:
 
-## Current scope
+```bash
+backend/.venv/bin/python -m pip install -r backend/requirements-dev.txt
+cd backend
+.venv/bin/python -m pytest -q
+```
 
-This repository currently contains only these two documentation files:
+For a frontend production build, from the repository root:
 
-| File | Purpose |
-| --- | --- |
-| [README.md](README.md) | Product model, current state, system boundaries, and entry point. |
-| [ARCHITECTURE_v0.1.md](ARCHITECTURE_v0.1.md) | Proposed boundaries, contracts, runtime behavior, customer platform concepts, and open decisions. |
+```bash
+cd frontend
+npm ci
+npm run build
+```
 
-This documentation milestone does not add application code, build configuration, dependencies, CI/CD, deployment configuration, or a working simulator. Build and execution instructions will be documented when an implementation exists.
+## Development data and access limits
 
-## First planned implementation milestone
+`backend/app/customer_context.py` selects the server-side development customer `demo-customer-01`. This single dependency is intended to be replaced by real authentication later. Browser-supplied customer IDs are not accepted as proof of authorization. The backend filters list and detail responses by the selected customer; a second customer's fixture record is present but hidden from the default customer.
 
-After the necessary design decisions are reviewed, the first implementation target is an end-to-end simulated local loop: virtual measurements, basic state estimation, a simple model and policy, a simple optimizer, supervisory acceptance, control commands, and simulated plant response.
+**Real authentication is not implemented. This development shell is not ready for public deployment.** Customer names, installation labels, and devices are clearly labeled fixtures. There is no database, telemetry pipeline, alarm history, subscription entitlement enforcement, billing integration, or local C++ equipment runtime.
 
-Its purpose is to validate the local architecture and failure behavior. It will not establish production readiness, physical model accuracy, hardware safety certification, or a delivered customer web platform.
+## Next planned equipment milestone
 
-## Technology direction
+The local control architecture calls for an end-to-end simulated loop: virtual measurements, state estimation, a simple model and policy, optimization proposals, supervisory acceptance, control commands, and simulated plant response. This remains future work and does not establish production readiness, physical model accuracy, or hardware safety certification.
 
-C++ is the current preference for the local core runtime; Python is a candidate for research and offline tooling. The customer interface direction is a web application. Backend framework, frontend framework, storage, industrial protocols, telemetry transport, and optimization libraries remain provisional choices. See the [technology section](ARCHITECTURE_v0.1.md#10-provisional-technology-direction) for current candidates.
-
-## Incremental development
-
-Keep the README and architecture document consistent as responsibilities, interfaces, assumptions, and open decisions change. Distinguish planned functionality from implemented behavior. Implementation is a separate milestone and should begin only when explicitly requested. No repository visibility, licensing, or publishing decision is implied by these documents.
+Subscription packaging, charging basis, expiry and offline behavior, historical-data access after expiry, remote commands, payment provider, currencies, and billing intervals remain open product decisions. No optimization capability has been assigned to a subscription tier.

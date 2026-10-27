@@ -1,0 +1,16 @@
+# Local Python environment and caches
+backend/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Frontend dependencies and generated files
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local secrets and editor files
+.env
+.env.*
+*.log
+.DS_Store
