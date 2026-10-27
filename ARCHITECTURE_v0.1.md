@@ -2,11 +2,11 @@
 
 | Field | Value |
 | --- | --- |
-| Product | Faradix Electrolyzer Control & Optimization Platform |
+| Product | Modular Faradix water-electrolyzer equipment, local control runtime, and customer web platform |
 | Document version | 0.1 |
 | Status | Proposed architecture; documentation baseline |
 | Prepared | 2026-10-27 |
-| Implementation status | No implementation is delivered by this documentation baseline |
+| Implementation status | No software implementation is present in this repository |
 | Basis | Supplied Faradix architecture context and the previously reviewed module-design draft |
 
 This is a self-contained repository document. It preserves the supplied architectural principles and distinguishes them from proposed internal designs and unresolved engineering choices. Version 0.1 identifies this document, not a software release or a finalized industrial design.
@@ -15,16 +15,18 @@ See [README.md](README.md) for the project introduction and current repository s
 
 ## 1. Scope and product context
 
-Faradix is developing a water electrolyzer for hydrogen production. The intended software will continuously observe the plant, estimate its state, predict its behavior, apply operating policies, propose operating targets, and control the equipment.
+Faradix sells modular physical water-electrolyzer products to customers who may own multiple devices or installations. The product model connects physical equipment and independent hardware safety, a local C++ control runtime near the equipment, and a central customer web platform for remote monitoring and related services. Faradix also sells recurring software-service subscriptions. Subscription packaging, pricing, billing intervals, and payment providers are undecided.
+
+The intended local software will continuously observe the plant, estimate its state, predict its behavior, apply operating policies, propose operating targets, and control the equipment. The customer web platform will manage device identity, ownership, authorized access, telemetry, history, alarms, and subscription-enabled services. It is not the location of the mandatory fast control loop.
 
 The final sensor inventory, actuator inventory, I/O topology, communication protocols, physical equations, operating envelope, safety functions, and timing requirements are not yet known. Examples in this document are design concepts rather than finalized hardware specifications.
 
 | Horizon | Scope |
 | --- | --- |
-| Current work | Write and review `README.md` and `ARCHITECTURE_v0.1.md` only. |
+| Current work | Update `README.md` and `ARCHITECTURE_v0.1.md` only; the repository contains documentation, with no runtime or web implementation. |
 | First planned implementation | Demonstrate an end-to-end closed loop against a virtual electrolyzer. |
-| Subsequent engineering | Integrate validated models, real device adapters, measured timing requirements, and hardware-specific operating procedures. |
-| Future capabilities | Advanced optimization, calibration workflows, richer HMI, external integration, digital-twin interoperability, and optional ML assistance. |
+| Subsequent engineering | Integrate validated models, real device adapters, measured timing requirements, hardware-specific procedures, and the customer web platform. |
+| Future capabilities | Advanced optimization, calibration workflows, additional customer services, external integration, digital-twin interoperability, and optional ML assistance. |
 
 Code scaffolding, dependency installation, build systems, CI/CD, containers, cloud deployment, and real hardware operation are outside the current documentation milestone. Future capabilities listed here are not commitments to implement them immediately.
 
@@ -32,54 +34,72 @@ Code scaffolding, dependency installation, build systems, CI/CD, containers, clo
 
 The following principles are retained from the project context:
 
-1. **Independent hard safety.** Critical protective functions must be designed to remain effective despite failures of the main application, optimizer, model, operating system, network, database, HMI, or cloud connection.
-2. **Explicit command authority.** The optimizer proposes setpoints. Supervisory control decides whether they may be applied. Low-level control produces actuator commands. Operator and external requests follow the same supervisory admission path.
+1. **Independent hard safety.** Critical protective functions must be designed to remain effective despite failures of the main application, optimizer, model, operating system, network, database, interface, cloud connection, or billing service.
+2. **Explicit command authority.** The optimizer proposes setpoints. Supervisory control decides whether they may be applied. Low-level control produces actuator commands. Operator requests, including any future remote requests, follow the same supervisory admission path.
 3. **Separate scientific and operational responsibilities.** The model predicts behavior; policy specifies objectives and operating constraints; optimization selects a proposal; control executes accepted targets.
 4. **Separate measurement from estimation.** DAQ reports validated observations and their quality. State estimation produces the best available estimate and its validity.
 5. **Stable hardware interfaces.** Vendor-specific behavior belongs in adapters. Simulated and real devices expose compatible domain contracts.
-6. **Independent execution rates.** Time-sensitive control does not wait for an optimizer, UI, database, or remote service to respond.
+6. **Independent execution rates.** Time-sensitive local control does not wait for an optimizer, UI, database, cloud platform, billing service, or entitlement check to respond. Cloud disconnection, subscription expiry, or billing outage must not disable independent safety or abruptly interrupt basic local control.
 7. **Simple initial deployment.** Start with a modular core. A logical module does not automatically require a separate process or microservice.
 8. **Traceable decisions.** Important commands, state transitions, model versions, policy versions, and configuration changes should be attributable to their inputs and context.
+9. **Customer isolation and backend enforcement.** Each customer and user may access only authorized devices and data. The platform backend enforces feature entitlements; frontend visibility is not an authorization boundary.
 
 These principles define the architecture's intended behavior. This document does not establish that any hardware, operating system, controller, or implementation already satisfies them.
 
 ## 3. Logical system architecture
 
+The three system parts have distinct failure and authority boundaries. Physical equipment includes dedicated independent safety functions. Local software near each equipment installation owns the control loop. The central platform receives asynchronous telemetry and serves authorized customer web views; it does not host the mandatory fast loop.
+
 ```mermaid
 flowchart TD
-    plant["Physical electrolyzer"]
-    adapter["Device abstraction"]
-    daq["Data acquisition"]
-    state["State estimation"]
-    model["Electrolyzer model engine"]
-    policy["Policy and constraints"]
-    opt["Optimization engine"]
-    sup["Supervisory control"]
-    rt["Real-time control"]
-    api["HMI and application API"]
-    safety["Independent safety controller"]
+    plant["Modular physical electrolyzer"]
+    safety["Independent hardware safety"]
+    adapter["Local device abstraction"]
+    daq["Local data acquisition"]
+    state["Local state estimation"]
+    model["Local model engine"]
+    policy["Local policy and constraints"]
+    opt["Local optimization"]
+    sup["Local supervisory control"]
+    rt["Local real-time control"]
+    telemetry["Asynchronous telemetry export"]
+    ingest["Central telemetry ingestion"]
+    history["Device history and alarms"]
+    registry["Customer and device ownership"]
+    entitlements["Backend subscription entitlements"]
+    access["Backend customer authorization"]
+    web["Customer web application"]
+    billing["Separate billing integration"]
 
-    plant <-->|"measurements and actuation"| adapter
-    adapter -->|"raw samples"| daq
-    daq -->|"validated measurements"| state
-    state -->|"state snapshot"| opt
-    opt <-->|"prediction requests and results"| model
-    policy -->|"objectives and constraints"| opt
-    policy -->|"operating limits"| sup
-    opt -->|"candidate setpoints"| sup
-    state -->|"state and validity"| sup
-    daq -->|"fast validated feedback"| rt
-    sup -->|"accepted setpoints"| rt
-    rt -->|"actuator commands"| adapter
-    api -->|"authorized requests"| sup
-    plant -->|"dedicated safety inputs"| safety
-    safety -->|"protective actions"| plant
-    safety -.->|"status"| sup
+    plant <-->|measurements and actuation| adapter
+    plant -->|dedicated safety inputs| safety
+    safety -->|protective actions| plant
+    adapter -->|raw samples| daq
+    daq -->|validated measurements| state
+    daq -->|fast validated feedback| rt
+    state -->|state snapshot| opt
+    opt <-->|predictions| model
+    policy -->|objectives and constraints| opt
+    policy -->|operating limits| sup
+    opt -->|candidate setpoints| sup
+    state -->|state and validity| sup
+    sup -->|accepted setpoints| rt
+    rt -->|actuator commands| adapter
+    daq -->|measurements| telemetry
+    sup -->|events and status| telemetry
+    telemetry -->|device-tagged telemetry| ingest
+    registry -->|device identity and ownership| ingest
+    ingest -->|validated records| history
+    registry -->|authorized device scope| access
+    history -->|device data| access
+    billing -->|subscription events| entitlements
+    entitlements -->|optional service decisions| access
+    access <-->|authorized customer views| web
 ```
 
-The model and policy are collaborators in decision-making, not mandatory sequential stages through which every sensor sample must pass. The fast feedback path supplies the measurements required by low-level control independently of slower estimation and optimization work.
+The model and policy remain separate collaborators in local decision-making. The fast feedback path supplies low-level control independently of slower estimation, optimization, telemetry export, and the central platform. Telemetry carries stable device identity and is mapped to customer ownership before the backend exposes it to a customer's panel. A customer may have several devices grouped by installation when that concept is useful.
 
-Supporting modules provide data history, diagnostics, configuration, calibration, application access, and optional external integration. They are described below; their arrows are omitted here to keep the control relationships readable.
+Telemetry export is asynchronous and bounded. Cloud or billing unavailability cannot stall local control. Any future remote-command path is separate from telemetry and requires backend authorization, a local admission interface, and local supervisory checks; no browser or billing service writes actuator commands.
 
 For software-only development, a virtual electrolyzer replaces the physical plant behind the device interface. A simulated safety model can exercise software scenarios; it is distinct from the independent safety hardware required for the real plant.
 
@@ -171,7 +191,7 @@ This path excludes blocking optimization, database access, remote API calls, and
 
 **Conceptual structure:** safety inputs and emergency-stop/interlock signals feed independent safety logic, which controls protective outputs and final elements. Main software may observe status; ordinary commands must not defeat protective action.
 
-The exact controller, sensor arrangement, trip conditions, reset conditions, safe states, failure coverage, and integrity requirements depend on the hardware safety design. HMI acknowledgement is distinct from safety reset and restart authorization.
+The exact controller, sensor arrangement, trip conditions, reset conditions, safe states, failure coverage, and integrity requirements depend on the hardware safety design. Operator-interface acknowledgement is distinct from safety reset and restart authorization.
 
 This subsection defines a boundary. It is not a safety implementation, certification, or complete hazard analysis.
 
@@ -201,7 +221,7 @@ Storage failure must not block the control cycle. Queue overflow policy and loss
 
 **Proposed internals:** diagnostic rules, persistence checks, severity classification, deduplication, alarm lifecycle management, and contextual event records.
 
-Inputs include measurement quality, device status, timing health, and model residuals where available. Outputs go to the supervisor, HMI, and event history. Acknowledging an alarm does not clear its cause or reset a safety trip. General application diagnostics do not replace independent safety functions.
+Inputs include measurement quality, device status, timing health, and model residuals where available. Outputs go to the supervisor, local operator interface, and event history. Acknowledging an alarm does not clear its cause or reset a safety trip. General application diagnostics do not replace independent safety functions.
 
 ### 4.13 Configuration and versioning
 
@@ -221,23 +241,55 @@ Invalid changes are rejected. Rollback also requires compatibility and operating
 
 The output is a candidate parameter/model bundle with a validity domain and supporting evidence. It reaches runtime only through the configuration activation workflow. Automatic online adaptation is a future capability with additional requirements.
 
-### 4.15 HMI and application API
+### 4.15 Local operator interface and control API
 
-**Responsibility:** expose monitoring and authorized operational actions to users.
+**Responsibility:** expose local monitoring and, where required, authorized operational requests without bypassing supervisory control.
 
-**Proposed internals:** live/trend/alarm views, API authorization, read/stream gateways, command admission into the supervisor, configuration requests, and request status tracking.
+**Proposed internals:** local status and alarm views or an application API, request authorization, command admission into the supervisor, and request status tracking. The form of a local operator interface is unresolved; a Qt desktop application is not an agreed requirement.
 
-Reads use snapshots or history. Commands carry identity and request IDs; handling must define deduplication and distinguish received, accepted, rejected, and applied states. A request ID alone does not guarantee exactly-once execution.
+Reads use local snapshots or history. Commands carry identity and request IDs; handling must define deduplication and distinguish received, accepted, rejected, and applied states. A request ID alone does not guarantee exactly-once execution.
 
-UI/API loss must not make the fast control loop wait. The HMI has no direct actuator-writing path and cannot bypass supervisory or safety restrictions.
+Interface loss must not make the fast control loop wait. No interface has a direct actuator-writing path or may bypass supervisory or safety restrictions.
 
-### 4.16 External integrations
+### 4.16 Telemetry export and external integrations
 
-**Responsibility:** connect optional SCADA, energy systems, remote analytics, and cloud services through explicit boundaries.
+**Responsibility:** send device-tagged telemetry, events, and health status to the central platform without coupling local control to connectivity.
 
-**Proposed internals:** protocol adapters, access control, mapping, input validation, bounded outbound buffering, and connection-health reporting.
+**Proposed internals:** bounded asynchronous export, device identity, timestamps and sequence references, reconnect behavior, delivery status, and explicit data-loss reporting. Optional SCADA, energy-system, and remote-analytics adapters use similarly bounded interfaces.
 
-Inbound operational requests use the normal application/supervisor path. Outbound telemetry is asynchronous. Disconnection and retries cannot stall local control. Industrial protocols, cloud integration, fleet functions, and external digital-twin tooling are outside the first implementation target unless a specific requirement makes them necessary.
+The central platform may be unavailable while local control continues. Transport, buffering limits, delivery guarantees, and reconciliation behavior remain design decisions. Telemetry export does not act as a command channel. Industrial protocols and other external integrations are outside the first local simulated-loop target unless a concrete requirement makes them necessary.
+
+### 4.17 Central customer web platform
+
+**Responsibility:** manage customer-visible devices and installations, receive telemetry, retain history and alarms, and serve authorized monitoring and subscription-enabled services through a web application.
+
+**Proposed internals:** telemetry ingestion, device registry, customer-scoped data storage, alarm and history queries, backend access checks, feature-entitlement checks, and a customer web API. The web application is the current customer-interface direction; its framework remains provisional.
+
+Incoming telemetry is associated with authenticated device identity and its current customer ownership before data becomes visible in the appropriate customer's panel. The platform is not responsible for the mandatory fast control loop. Possible paid services include extended history, analytics, reports, or remote support; these are examples, not committed subscription-plan contents.
+
+### 4.18 Customer, user, and device ownership
+
+**Responsibility:** represent customer or tenant accounts, user access, device identity, device ownership, and optional installation or device-group membership.
+
+**Proposed internals:** stable device identifiers, enrollment and ownership records, customer/user roles or permissions, installation/group associations, and audited reassignment. A customer may own multiple devices; one device's data and actions must not leak to another customer.
+
+Every platform read and action must resolve the user's authority over the referenced device and data. Group membership is useful for navigation and aggregation but cannot replace device-level ownership checks. The exact tenancy and role model remains open.
+
+### 4.19 Subscription plans and feature entitlements
+
+**Responsibility:** represent subscription state and decide which optional platform services a customer may use.
+
+**Proposed internals:** plan definitions, customer subscriptions, effective entitlement evaluation, lifecycle state, and an auditable backend decision record. The backend enforces entitlements; hiding frontend controls alone is insufficient.
+
+The included feature set, paid feature set, charging basis, grace-period behavior, and relationship between entitlements and optimization capabilities are undecided. Entitlement checks stay outside the time-critical local control path. Expiry must not disable independent hardware safety or abruptly interrupt basic local control; treatment of optional remote services requires a defined lifecycle policy.
+
+### 4.20 Billing integration
+
+**Responsibility:** exchange subscription and payment state with a billing provider while keeping commercial transactions separate from device operation and entitlement policy.
+
+**Proposed internals:** provider adapter, event reconciliation, idempotent state updates, and failure reporting. Payment provider, currencies, pricing, and billing intervals have not been chosen.
+
+A billing outage must not become a control-loop dependency. The subscription lifecycle must define how stale or missing billing events affect optional services, including offline and grace periods, without impairing independent safety or basic local control.
 
 ## 5. Shared domain contracts
 
@@ -255,6 +307,10 @@ The following are proposed conceptual contracts, not finalized C++, database, or
 | `Fault` / `Event` | Identity, source, severity, time, lifecycle status, context references | A diagnosable condition or operational event. |
 | `ModelBundle` | Code version, parameter version, validity domain, validation reference | A compatible model configuration. |
 | `ConfigSnapshot` | Version, compatible dependencies, activation record, author/reason | An immutable active configuration and its history. |
+| `DeviceIdentity` | Stable ID, enrollment state, ownership reference, installation/group references | Associates equipment telemetry with the correct customer. |
+| `TelemetryEnvelope` | Device ID, source time, sequence, quality, measurement/event references | Asynchronous data for central ingestion, distinct from a control request. |
+| `CustomerAccess` | Tenant/customer ID, user ID, role or permissions, device scope | Backend authorization for customer data and actions. |
+| `FeatureEntitlement` | Customer/subscription reference, feature key, effective state and validity | Backend decision for an optional service, not a time-critical safety or control input. |
 
 Source timestamps, receipt timestamps, simulation time, and deadline clocks serve different purposes. Define their clock domains explicitly. Local elapsed-time checks should use an appropriate monotonic time base; cross-device timestamps require a synchronization policy rather than direct comparison by assumption.
 
@@ -276,22 +332,24 @@ flowchart TD
     manual --> admit
     context --> admit
     admit --> result
-    result -->|"no"| reject
-    result -->|"yes"| target
+    result -->|no| reject
+    result -->|yes| target
     target --> rt
-    rt -->|"bounded commands"| device
-    rt -.->|"execution health"| admit
+    rt -->|bounded commands| device
+    rt -.->|execution health| admit
 ```
 
 Acceptance evaluates source authority, current mode, data quality, proposal age, operating limits, and transition restrictions. The real-time layer independently checks the accepted target's lease and its own feedback quality.
 
-Authority priority between local manual operation, automatic optimization, and remote requests is unresolved. There must be an explicit active command owner and a defined handover; simultaneous writers are not an acceptable implicit policy.
+Authority priority between local manual operation, automatic optimization, and any future remote requests is unresolved. There must be an explicit active command owner and a defined handover; simultaneous writers are not an acceptable implicit policy.
+
+Remote operational commands are not a committed product feature. If offered later, their path must be separate from telemetry: customer web request → central backend authentication, device authorization, and applicable feature-entitlement check → protected local command interface → local supervisor admission → real-time control → device adapter. The browser and billing service never command actuators directly. A central acceptance response is not proof of local application, and lost connectivity must leave the local runtime in its defined operating mode.
 
 ## 7. Runtime, lifecycle, and failure behavior
 
 ### 7.1 Proposed execution arrangement
 
-A reasonable starting point is a modular C++ runtime with separate execution paths for fast I/O/control, state/supervisory work, and bounded optimization jobs. Supporting API and storage work remains outside the control cycle. Module calls within a process do not need network RPC.
+A reasonable starting point is a modular local C++ runtime near the equipment, with separate execution paths for fast I/O/control, state/supervisory work, and bounded optimization jobs. Supporting local API, storage, and telemetry-export work remains outside the control cycle. The central customer web platform is a separate system, not the location of the mandatory fast loop. Module calls within a local process do not need network RPC.
 
 Use coherent snapshots, bounded queues, and a target mailbox with explicit ownership and synchronization. A thread separation alone does not isolate process crashes, memory corruption, resource exhaustion, or all scheduling interference. Consider a separate worker process when Python integration, blocking libraries, or fault-isolation requirements justify it.
 
@@ -314,7 +372,8 @@ Final state names, transition guards, recovery conditions, and startup/shutdown 
 | Expired accepted target | Real-time control | Invoke defined local fallback and report status. |
 | I/O failure or control deadline miss | Device/runtime monitoring | Execute hardware-specific local behavior and notify supervisory control. |
 | Database unavailable or queue full | Background writer/queue monitoring | Keep control non-blocking; report loss/degradation and apply the defined audit policy. |
-| UI, API, or cloud unavailable | Application/integration monitoring | Continue local control subject to its operational authority policy. |
+| UI, API, or cloud unavailable | Application/integration monitoring | Continue basic local control subject to its operational authority policy; report delayed telemetry and remote-service degradation. |
+| Subscription expired or billing/entitlement service unavailable | Central subscription and billing monitoring | Apply the defined policy to optional platform services; never disable independent safety or abruptly interrupt basic local control. |
 | Main application or OS failure | Independent hardware mechanisms | Hardware safety and device failure behavior must cover the relevant scenarios. |
 | Safety trip | Independent safety layer | Protective action has priority; restart follows separately defined conditions. |
 
@@ -332,7 +391,7 @@ flowchart TD
     plant["Physical electrolyzer"]
     scenarios["Clock, scenarios and fault injection"]
 
-    core <-->|"commands and measurements"| contract
+    core <-->|commands and measurements| contract
     contract <--> virtual
     contract <--> real
     virtual <--> sim
@@ -351,7 +410,7 @@ The first planned software milestone will demonstrate:
 - Continued bounded control when non-critical consumers are slow or unavailable.
 - Sufficient event and version context to investigate a decision or transition.
 
-These are future acceptance goals, not test results. Use repeatable scenarios and varied plant/model parameters; a successful loop using identical models is not evidence of physical accuracy or hardware safety.
+These are future acceptance goals, not test results. Use repeatable scenarios and varied plant/model parameters; a successful loop using identical models is not evidence of physical accuracy or hardware safety. Later platform validation must also test customer data isolation, device ownership mapping, backend entitlements, and local control during cloud or billing outages.
 
 ## 9. Configuration and decision traceability
 
@@ -359,7 +418,7 @@ Keep model code, calibrated parameters, operating policies, and device bindings 
 
 For an important decision, retain enough context to identify the relevant state snapshot, active lifecycle/authority, model and policy versions, candidate, admission outcome, accepted target, dispatch outcome, and available readback. Define recording rates and retention according to data volume and investigation needs.
 
-A model calibration workflow produces a reviewed candidate bundle. A configuration workflow activates it. Neither an offline fitting script nor an HMI form directly mutates a live controller's internal parameters during a cycle.
+A model calibration workflow produces a reviewed candidate bundle. A configuration workflow activates it. Neither an offline fitting script nor a local or web interface directly mutates a live controller's internal parameters during a cycle.
 
 ## 10. Provisional technology direction
 
@@ -370,12 +429,13 @@ These are candidates retained from the project discussion, not installed depende
 | Core, adapters, estimation, control | C++20 or C++23 | Toolchain, supported standard, and hardware constraints. |
 | Research, fitting, offline analysis | Python | Boundary between experimental and deployed components. |
 | Optimization | Simple initial approach; CasADi and acados/generated code as future candidates | Problem formulation, solver budget, licensing and deployment fit. |
-| Application API | FastAPI | Actual API/process boundary and authority model. |
-| HMI | React and TypeScript | Operator workflows and minimum required views. |
+| Central platform API | FastAPI as a candidate | Backend authorization, customer isolation, and actual API/process boundaries. |
+| Customer web application | React and TypeScript as candidates | Customer workflows and minimum required views; Qt desktop is not an agreed requirement. |
 | Storage | PostgreSQL; optional time-series extension or partitioning | Ingestion volume, retention, and query requirements. |
 | Cross-process API | gRPC and Protocol Buffers where needed | Whether an RPC boundary is justified for each connection. |
 | Field/industrial communication | EtherCAT, Modbus, CAN, OPC UA or vendor interfaces | Actual devices, topology, and timing requirements. |
-| Remote telemetry | MQTT where justified | External consumers and connectivity requirements. |
+| Remote telemetry | MQTT where justified | Device identity, delivery, buffering, and connectivity requirements. |
+| Subscription and billing services | No provider or implementation selected | Plan contents, charging basis, lifecycle policy, payment provider, currencies, and billing intervals. |
 | Edge execution | Linux; possible PREEMPT_RT | Measured timing needs and deployment qualification. |
 | Safety | Independent safety controller/PLC or equivalent design | Hardware hazard analysis and protective-function requirements. |
 | Build and validation | CMake, GoogleTest, pytest as applicable | Implementation scope and useful test boundaries. |
@@ -396,6 +456,12 @@ No component is selected merely because it appears in this table. In particular,
 | Fallback and safety | Situation-specific fallback, protective actions, reset conditions, and independent hardware coverage. |
 | Optimization | Decision variables, objectives, feasibility criteria, priorities, and solver failure policy. |
 | Data and observability | Rates, precision, queue sizes, retention, audit requirements, and acceptable data loss. |
+| Included and subscription features | Which services are included, which are paid, and whether any optimization capability is subscription-dependent. |
+| Charging basis | Per customer, installation, device, or another basis. |
+| Subscription lifecycle | Activation, renewal, expiry, cancellation, offline behavior, and grace-period rules for optional services. |
+| Historical data after expiry | Continued access, export, and retention when a subscription expires. |
+| Remote operational commands | Whether they will be offered; if so, authority, local admission, loss-of-connection behavior, and audit rules. |
+| Payments | Pricing, payment provider, supported currencies, and billing intervals. |
 | Deployment | Actual process boundaries, resources, service dependencies, and target platform. |
 
 These are decisions to resolve with relevant software, hardware, and modeling contributors. Unknown values must remain explicitly unknown rather than being filled with arbitrary operating numbers.
