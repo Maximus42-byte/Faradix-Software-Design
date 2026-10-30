@@ -52,7 +52,7 @@ export function AppShell({ title, children }: { title: string; children: ReactNo
         })}
       </nav>
       <div className="sidebar-spacer" />
-      <div className="demo-card"><span className="demo-card-icon">i</span><div><strong>Development demo</strong><p>Fixture inventory only. No live equipment data or authentication.</p></div></div>
+      <div className="demo-card"><span className="demo-card-icon">i</span><div><strong>Development demo</strong><p>Development fixtures and optional simulated samples. No live equipment data or authentication.</p></div></div>
       <div className="sidebar-footer">Faradix platform shell <span>·</span> Local only</div>
     </aside>
     <div className="main-column">

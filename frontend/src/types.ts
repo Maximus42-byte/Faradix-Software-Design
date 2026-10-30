@@ -28,3 +28,21 @@ export type SubscriptionStatus = {
   status: 'not_configured'
   message: string
 }
+
+export type TelemetrySample = {
+  schema_version: '1'
+  device_id: string
+  measured_at: string
+  source: 'simulated'
+  measurements: {
+    stack_voltage_v: number
+    stack_current_a: number
+    electrolyte_temperature_c: number
+  }
+}
+
+export type LatestTelemetry = {
+  status: 'no_samples' | 'fresh' | 'stale'
+  freshness_seconds: number
+  sample: TelemetrySample | null
+}

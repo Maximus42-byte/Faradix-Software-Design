@@ -1,4 +1,4 @@
-import type { Customer, Device, DeviceDetail, Health, SubscriptionStatus } from './types'
+import type { Customer, Device, DeviceDetail, Health, SubscriptionStatus, LatestTelemetry } from './types'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/, '')
 
@@ -9,12 +9,13 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string): Promise<T> {
+async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
   let response: Response
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
       headers: { Accept: 'application/json' },
       cache: 'no-store',
+      signal,
     })
   } catch {
     throw new ApiError(0, 'Cannot reach the Faradix development API.')
@@ -30,3 +31,4 @@ export const getCurrentCustomer = () => request<Customer>('/me')
 export const getDevices = () => request<Device[]>('/devices')
 export const getDevice = (id: string) => request<DeviceDetail>(`/devices/${encodeURIComponent(id)}`)
 export const getSubscription = () => request<SubscriptionStatus>('/subscription')
+export const getDeviceTelemetry = (id: string, signal?: AbortSignal) => request<LatestTelemetry>(`/devices/${encodeURIComponent(id)}/telemetry`, signal)

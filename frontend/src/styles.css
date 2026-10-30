@@ -166,3 +166,11 @@ button:focus-visible, a:focus-visible { outline: 3px solid #40b5aa; outline-offs
   .backend-status { max-width: 95px; white-space: normal; }
   .inventory-row .tag-muted { display: none; }
 }
+.telemetry-labels { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.simulated-label { display: inline-flex; padding: 7px 10px; border-radius: 6px; background: #fff0cc; color: #704c0b; font-size: 12px; font-weight: 800; }
+.telemetry-condition { font-size: 11px; font-weight: 700; }
+.telemetry-condition.fresh { color: #237a66; }
+.telemetry-condition.stale { color: #ad642e; }
+.telemetry-explainer { color: #71838c; font-size: 11px; line-height: 1.5; margin: 12px 0; }
+.telemetry-notice { padding: 12px; border: 1px solid #ead9d4; border-radius: 7px; background: #fffdfc; color: #975847; font-size: 12px; }
+.telemetry-notice p { margin: 5px 0 0; line-height: 1.5; }

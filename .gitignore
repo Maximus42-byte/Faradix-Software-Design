@@ -14,3 +14,7 @@ frontend/.vite/
 .env.*
 *.log
 .DS_Store
+
+# Local C++ build and runtime snapshots
+engine/build/
+engine/run/

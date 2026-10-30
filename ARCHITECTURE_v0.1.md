@@ -4,9 +4,9 @@
 | --- | --- |
 | Product | Modular Faradix water-electrolyzer equipment, local control runtime, and customer web platform |
 | Document version | 0.1 |
-| Status | Proposed target architecture with an implemented local-development customer web shell |
+| Status | Proposed target architecture with an implemented C++ development engine, simulated device, snapshot bridge, and customer web shell |
 | Prepared | 2026-10-27 |
-| Implementation status | React/TypeScript/Vite frontend and FastAPI fixture API implemented; no equipment runtime or live integration |
+| Implementation status | C++20 engine foundation and toy simulated device; atomic snapshot and Python bridge into the existing development telemetry API and web panel; no hardware integration |
 | Basis | Supplied Faradix architecture context and the previously reviewed module-design draft |
 
 This is a self-contained repository document. It preserves the supplied architectural principles and distinguishes them from proposed internal designs and unresolved engineering choices. Version 0.1 identifies this document, not a software release or a finalized industrial design.
@@ -23,12 +23,12 @@ The final sensor inventory, actuator inventory, I/O topology, communication prot
 
 | Horizon | Scope |
 | --- | --- |
-| Current repository | Runnable local-development customer web shell and read-only fixture API; no real authentication, telemetry, billing, or subscriptions. |
-| Next local-control milestone | Demonstrate an end-to-end closed loop against a virtual electrolyzer. |
+| Current repository | Runnable C++ engine foundation, simulated device, snapshot bridge, and customer web shell; no physical telemetry, real authentication, billing, or subscriptions. |
+| Next local-control milestone | Add state estimation, predictive modeling, policy, optimization proposals, and richer supervisory behavior around the existing toy device boundary. |
 | Subsequent engineering | Integrate validated models, real device adapters, measured timing requirements, hardware-specific procedures, and the customer web platform. |
 | Future capabilities | Advanced optimization, calibration workflows, additional customer services, external integration, digital-twin interoperability, and optional ML assistance. |
 
-The present shell adds `frontend/`, `backend/`, local dependencies, a frontend lockfile, and focused customer-access tests. It does not add a database, cloud deployment, live telemetry, authentication, payment handling, or real hardware operation. Future capabilities listed here are not commitments to implement them immediately.
+The present repository has `engine/`, `frontend/`, `backend/`, local dependencies, focused C++ and Python tests, and a simulated engine-to-panel telemetry path. It does not add a database, cloud deployment, physical telemetry, authentication, payment handling, or real hardware operation. Future capabilities listed here are not commitments to implement them immediately.
 
 ## 2. Architectural baseline
 
@@ -48,7 +48,7 @@ These principles define the architecture's intended behavior. This document does
 
 ## 3. Logical system architecture
 
-The three system parts have distinct failure and authority boundaries. Physical equipment includes dedicated independent safety functions. Planned local software near each equipment installation owns the control loop. The target central platform will receive asynchronous telemetry and serve authorized customer web views; it does not host the mandatory fast loop. The diagram below shows the proposed target, not the current fixture-only data flow.
+The three system parts have distinct failure and authority boundaries. Physical equipment includes dedicated independent safety functions. Planned local software near each equipment installation owns the control loop. The target central platform will receive asynchronous telemetry and serve authorized customer web views; it does not host the mandatory fast loop. The diagram below shows the proposed equipment and platform target, not the limited implemented engine foundation.
 
 ```mermaid
 flowchart TD
@@ -99,9 +99,39 @@ flowchart TD
 
 The model and policy remain separate collaborators in local decision-making. The fast feedback path supplies low-level control independently of slower estimation, optimization, telemetry export, and the central platform. Telemetry carries stable device identity and is mapped to customer ownership before the backend exposes it to a customer's panel. A customer may have several devices grouped by installation when that concept is useful.
 
-Telemetry export is intended to be asynchronous and bounded. Cloud or billing unavailability cannot stall local control. Neither export nor local control is implemented in this shell. Any future remote-command path is separate from telemetry and requires backend authorization, a local admission interface, and local supervisory checks; no browser or billing service writes actuator commands.
+Telemetry export from future equipment software is intended to be asynchronous and bounded. Cloud or billing unavailability cannot stall local control. The development engine already steps independently of the bridge and backend; equipment export and qualified local control remain unimplemented. Any future remote-command path is separate from telemetry and requires backend authorization, a local admission interface, and local supervisory checks; no browser or billing service writes actuator commands.
 
 For software-only development, a virtual electrolyzer replaces the physical plant behind the device interface. A simulated safety model can exercise software scenarios; it is distinct from the independent safety hardware required for the real plant.
+
+### Implemented synthetic transport path
+
+```mermaid
+flowchart LR
+    engine["C++ toy engine and simulated device"]
+    snapshot["Atomic version 1 JSON snapshot"]
+    bridge["Python snapshot bridge"]
+    ingest["Development ingest: credential mapped to demo-unit-001"]
+    latest["Latest sample in backend memory"]
+    ownership["Server-side customer and device ownership"]
+    read["Customer-scoped latest telemetry API"]
+    panel["Device Details web panel"]
+
+    engine -->|public measurements| snapshot
+    snapshot -->|new run and sequence| bridge
+    bridge -->|existing version 1 simulated contract| ingest
+    ingest -->|validated, newer sample| latest
+    latest --> read
+    ownership -->|authorized device only| read
+    read -->|empty, fresh or stale| panel
+```
+
+This development path has a deterministic toy plant and minimal command admission, but no equipment I/O, state estimator, predictive model, operating policy, optimizer, qualified real-time control, or physical safety function. The earlier standalone Python synthetic mode remains available for transport-only tests. `POST /api/v1/dev/telemetry` is disabled unless explicitly enabled and given an environment credential. The credential maps server-side to one demo device; the payload cannot assert customer ownership. The provisional envelope contains a version, device ID, timezone-aware measurement time, `simulated` source marker, and finite voltage (V), current (A), and temperature (°C) fields. Values are synthetic examples, not operating limits. The engine snapshot contains a run ID, sample sequence, simulation time, and original UTC measurement time. Its atomic file replacement and bounded Python bridge live outside the engine core. The bridge maps the snapshot to the server-owned demo device and keeps at most one pending sample; it never refreshes an unchanged snapshot. The backend latest sample survives only while its single process runs. Older or equal measurement times are rejected. `GET /api/v1/devices/{device_id}/telemetry` checks the current development customer and device ownership; it marks a sample stale after 15 seconds from its measurement time. The browser polls every 5 seconds by default without overlapping requests, retains stale readings, and shows backend unavailability separately from sample freshness. None of these states proves that physical hardware is connected. See [README.md](README.md) for setup and exact commands.
+
+### Implemented engine foundation and limits
+
+`faradix_core` advances fixed simulation steps and admits only finite dimensionless baseline drive requests from 0 to 1. `faradix_simulated_device` implements the replaceable `Device` interface; the engine sees only its public voltage, current, and temperature measurements, not hidden toy plant state. A rejected request is not applied and does not advance simulation time. `faradix_snapshot_adapter` writes complete versioned JSON to a temporary file and atomically replaces the latest snapshot. The C++ executable supports bounded steps or continuous wall-paced operation with signal-driven shutdown. It does not depend on Python, HTTP, backend availability, browser state, customer context, or subscription state. It makes no hard real-time guarantee.
+
+The uncalibrated toy plant uses `I = 20u` A, `V = 40 + 0.5I + 0.01(T - 25)` V, and explicit Euler `T_next = T + dt × [0.002 I² - 0.08(T - 25)]` °C. Initial temperature is 25 °C. Here `u` is the admitted dimensionless drive and `dt` is the fixed simulation step in seconds. These coefficients and the software command range are development choices, **not validated equipment limits**. The toy plant is separate from the planned predictive physics model; it cannot establish physical accuracy. Simulation time advances only through admitted steps; UTC measurement time is captured from the wall clock for each exported sample. The Python bridge preserves that timestamp. Pending modules are state estimation, predictive modeling, operating policy, optimization proposals, full supervisory modes and fallback, real-time control, hardware I/O, and independent physical safety.
 
 ## 4. Module responsibilities and internal structure
 
@@ -114,6 +144,8 @@ For software-only development, a virtual electrolyzer replaces the physical plan
 **Inputs and outputs:** receive raw device I/O and `ControlCommand` requests; emit sample envelopes, communication status, dispatch results, and readback when supported.
 
 Timeouts and communication errors must remain explicit. Successful transmission is not proof that an actuator physically reached its requested state. Independent safety actions do not pass through this application abstraction.
+
+**Implemented foundation:** the C++ `Device` interface exposes `measure()` and `advance(step_seconds, AdmittedCommand)`; only `SimulatedDevice` implements it. No hardware protocol or actuator adapter exists.
 
 ### 4.2 Data acquisition
 
@@ -174,6 +206,8 @@ Timeout, infeasibility, and invalid predictions are normal explicit outcomes. Th
 **Inputs and outputs:** optimizer proposals or authorized operator requests, together with state, policy, faults, and safety status, produce `AcceptedSetpoint` or a rejection with a reason.
 
 Manual mode does not bypass restrictions. Clamping or shaping a proposal requires rechecking relevant coupled constraints. Holding the last target is permitted only when its validity and the operating procedure allow it.
+
+**Implemented foundation:** the engine admits finite toy drive requests within 0–1 before invoking the simulated device. This is only a baseline admission check, not the proposed full supervisor, lifecycle, or hardware operating policy.
 
 ### 4.8 Real-time control
 
@@ -257,7 +291,7 @@ Interface loss must not make the fast control loop wait. No interface has a dire
 
 **Proposed internals:** bounded asynchronous export, device identity, timestamps and sequence references, reconnect behavior, delivery status, and explicit data-loss reporting. Optional SCADA, energy-system, and remote-analytics adapters use similarly bounded interfaces.
 
-The central platform may be unavailable while local control continues. Transport, buffering limits, delivery guarantees, and reconciliation behavior remain design decisions. Telemetry export does not act as a command channel. Industrial protocols and other external integrations are outside the first local simulated-loop target unless a concrete requirement makes them necessary.
+The central platform may be unavailable while local control continues. The C++ snapshot adapter and Python development bridge demonstrate that the toy engine can continue when the bridge or backend stops; they do not implement production equipment export. Transport, buffering limits, delivery guarantees, and reconciliation behavior for actual equipment remain design decisions. Telemetry export does not act as a command channel. Industrial protocols and other external integrations are outside the first local simulated-loop target unless a concrete requirement makes them necessary.
 
 ### 4.17 Central customer web platform
 
@@ -265,9 +299,9 @@ The central platform may be unavailable while local control continues. Transport
 
 **Proposed internals:** telemetry ingestion, device registry, customer-scoped data storage, alarm and history queries, backend access checks, feature-entitlement checks, and a customer web API.
 
-**Implemented shell:** `frontend/` uses React, TypeScript, and Vite for Overview, My Devices, Device Details, and Subscription. `backend/` uses FastAPI for `/api/v1/health`, `/me`, `/devices`, `/devices/{device_id}`, and `/subscription`. The browser reads fixture inventory from this API. Overview counts and integration summaries are derived from those responses; device telemetry and history are explicitly empty. The header checks backend health, and the browser remains navigable if the API is unavailable. There is no telemetry ingestion, alarm history, persistent storage, operational command route, or real subscription service.
+**Implemented development path:** `frontend/` uses React, TypeScript, and Vite for Overview, My Devices, Device Details, and Subscription. `backend/` uses FastAPI for health, fixture customer and device records, subscription status, latest customer-scoped telemetry reads, and disabled-by-default development ingestion. A Python bridge sends new C++ engine snapshots for one existing demo device; its older synthetic mode remains an independent transport demo. The backend keeps only the newest sample in process memory; Device Details polls and labels empty, fresh, stale, and backend-unavailable states. History, alarms, persistent storage, operational commands, real equipment integration, and subscriptions remain unimplemented.
 
-Incoming telemetry is associated with authenticated device identity and its current customer ownership before data becomes visible in the appropriate customer's panel. The platform is not responsible for the mandatory fast control loop. Possible paid services include extended history, analytics, reports, or remote support; these are examples, not committed subscription-plan contents.
+The target platform must associate incoming telemetry with authenticated device identity and current customer ownership before exposing it. The development path instead uses an environment-provided bearer credential mapped server-side to one fixture device, plus the existing server-side customer dependency and ownership check on reads. This is not production authentication. The platform is not responsible for the mandatory fast control loop. Possible paid services include extended history, analytics, reports, or remote support; these are examples, not committed subscription-plan contents.
 
 ### 4.18 Customer, user, and device ownership
 
@@ -277,7 +311,7 @@ Incoming telemetry is associated with authenticated device identity and its curr
 
 Every platform read and action must resolve the user's authority over the referenced device and data. Group membership is useful for navigation and aggregation but cannot replace device-level ownership checks. The exact tenancy and role model remains open.
 
-**Implemented development boundary:** a single replaceable FastAPI dependency selects `demo-customer-01` on the server. Fixtures contain two customers and devices for both; list and detail routes return only the selected customer's devices, using the same `404` for unknown and other-customer IDs. Browser-supplied customer IDs do not confer authority. This is fixture scoping, not authentication or a production tenant-security design. The shell is not ready for public deployment.
+**Implemented development boundary:** a single replaceable FastAPI dependency selects `demo-customer-01` on the server. Fixtures contain two customers and devices for both; list, detail, and latest-telemetry routes return only the selected customer's devices, using the same `404` for unknown and other-customer IDs. Browser-supplied customer IDs do not confer authority. The development publisher credential permits only `demo-unit-001`, regardless of submitted ownership claims. This is fixture scoping, not authentication or a production tenant-security design. The shell is not ready for public deployment.
 
 ### 4.19 Subscription plans and feature entitlements
 
@@ -299,7 +333,7 @@ A billing outage must not become a control-loop dependency. The subscription lif
 
 ## 5. Shared domain contracts
 
-The following are proposed conceptual target contracts, not finalized C++, database, or Protocol Buffers schemas. Serialization, identifiers, precision, units, and compatibility rules remain design tasks. The current FastAPI Pydantic response models cover only health, the development customer, fixture devices, and an unconfigured subscription status; they do not implement these target domain contracts.
+The following are proposed conceptual target contracts, not finalized C++, database, or Protocol Buffers schemas. Serialization, identifiers, precision, units, and compatibility rules remain design tasks. The current C++ foundation defines `Measurements`, `DeviceState`, `RequestedCommand`, `AdmittedCommand`, and a replaceable `Device` interface. Its development JSON snapshot is version 1 and distinct from the existing FastAPI version 1 simulated telemetry ingest contract. The Python bridge validates and maps between them. These small contracts do not implement the target equipment domain contracts.
 
 | Contract | Minimum information | Key meaning |
 | --- | --- | --- |
@@ -355,7 +389,7 @@ Remote operational commands are not a committed product feature. If offered late
 
 ### 7.1 Proposed execution arrangement
 
-A reasonable future starting point is a modular local C++ runtime near the equipment, with separate execution paths for fast I/O/control, state/supervisory work, and bounded optimization jobs. Supporting local API, storage, and telemetry-export work remains outside the control cycle. The central customer web platform is a separate system, not the location of the mandatory fast loop. Module calls within a local process do not need network RPC. The current repository instead runs local-only Vite and FastAPI development servers, both bound to `127.0.0.1`.
+A reasonable future starting point is a modular local C++ runtime near the equipment, with separate execution paths for fast I/O/control, state/supervisory work, and bounded optimization jobs. Supporting local API, storage, and telemetry-export work remains outside the control cycle. The central customer web platform is a separate system, not the location of the mandatory fast loop. Module calls within a local process do not need network RPC. The current repository runs a standalone C++ toy engine and separate local-only Vite and FastAPI development servers, both servers bound to `127.0.0.1`.
 
 Use coherent snapshots, bounded queues, and a target mailbox with explicit ownership and synchronization. A thread separation alone does not isolate process crashes, memory corruption, resource exhaustion, or all scheduling interference. Consider a separate worker process when Python integration, blocking libraries, or fault-isolation requirements justify it.
 
@@ -409,14 +443,14 @@ The architecture target is to change device bindings without rewriting the core'
 
 The next planned local-control milestone will demonstrate:
 
-- A complete command/measurement loop through the simulator and core modules.
-- Distinct optimizer proposals, accepted targets, and actuator commands.
+- Extend the implemented toy command/measurement loop with state estimation and a separate predictive model.
+- Add distinct policy objectives, optimizer proposals, supervisor-accepted targets, and eventual actuator commands.
 - Enforcement of declared application limits and target validity.
 - Explicit responses to stale data, invalid estimates, optimization failure, and simulated device faults.
 - Continued bounded control when non-critical consumers are slow or unavailable.
 - Sufficient event and version context to investigate a decision or transition.
 
-These are future local-control acceptance goals, not test results. Use repeatable scenarios and varied plant/model parameters; a successful loop using identical models is not evidence of physical accuracy or hardware safety. Current backend tests cover fixture ownership scoping only. Later platform validation must test real authentication, customer data isolation, device ownership mapping, backend entitlements, and local control during cloud or billing outages.
+These are remaining local-control acceptance goals beyond the tested foundation, not claims of completed behavior. Use repeatable scenarios and varied plant/model parameters; a successful loop using identical models is not evidence of physical accuracy or hardware safety. Current C++ tests cover deterministic stepping, command admission and device calls, and bounded execution. Python tests cover fixture ownership scoping, synthetic ingestion, device restriction, sample validation and ordering, freshness, snapshot deduplication, timestamp preservation, restart recognition, and bounded retries. Later platform validation must test real authentication, customer data isolation, device ownership mapping, backend entitlements, and local control during cloud or billing outages.
 
 ## 9. Configuration and decision traceability
 
@@ -428,11 +462,11 @@ A model calibration workflow produces a reviewed candidate bundle. A configurati
 
 ## 10. Provisional technology direction
 
-FastAPI, React, TypeScript, and Vite are implemented in the local customer shell. Other entries remain candidates for later equipment and platform work, not installed dependencies or finalized requirements.
+C++20 and CMake are implemented for the development engine; FastAPI, React, TypeScript, and Vite are implemented for the customer shell. Other entries remain candidates for later equipment and platform work, not installed dependencies or finalized requirements.
 
 | Area | Current direction | Decision still needed |
 | --- | --- | --- |
-| Core, adapters, estimation, control | C++20 or C++23 | Toolchain, supported standard, and hardware constraints. |
+| Core and simulated adapter | C++20 engine foundation implemented with GCC 11 and CMake 3.22 | Production toolchain, hardware adapters, estimation, model, policy, optimization, and timing constraints. |
 | Research, fitting, offline analysis | Python | Boundary between experimental and deployed components. |
 | Optimization | Simple initial approach; CasADi and acados/generated code as future candidates | Problem formulation, solver budget, licensing and deployment fit. |
 | Central platform API | FastAPI implemented for the local fixture API | Real authentication, authorization model, persistence, and production API boundaries. |
@@ -444,10 +478,10 @@ FastAPI, React, TypeScript, and Vite are implemented in the local customer shell
 | Subscription and billing services | No provider or implementation selected | Plan contents, charging basis, lifecycle policy, payment provider, currencies, and billing intervals. |
 | Edge execution | Linux; possible PREEMPT_RT | Measured timing needs and deployment qualification. |
 | Safety | Independent safety controller/PLC or equivalent design | Hardware hazard analysis and protective-function requirements. |
-| Build and validation | Vite build and pytest implemented for the shell; CMake and GoogleTest are later candidates | Equipment implementation scope and useful test boundaries. |
+| Build and validation | CMake/CTest for the engine; Vite build and pytest for the platform | Equipment validation scope, hardware tests, and any future test-framework choice. |
 | Deployment | Native control runtime; containers considered for supporting services | Isolation and operational requirements. |
 
-Only FastAPI, React, TypeScript, Vite, and the focused shell test dependencies are selected by the current implementation. Other entries remain provisional. A service mesh, Kubernetes deployment, distributed microservices, advanced ML, and a full digital twin are not initial architectural requirements.
+C++20, CMake, CTest, FastAPI, React, TypeScript, Vite, and focused test dependencies are selected by the current development implementation. Other entries remain provisional. A service mesh, Kubernetes deployment, distributed microservices, advanced ML, and a full digital twin are not initial architectural requirements.
 
 ## 11. Open decisions
 
@@ -474,6 +508,6 @@ These are decisions to resolve with relevant software, hardware, and modeling co
 
 ## 12. Incremental documentation workflow
 
-Keep `README.md` and this architecture document synchronized with the implemented shell and with later architectural decisions. The README gives exact local setup and startup commands; this document separates current fixture behavior from the proposed physical, local-control, and central-platform target.
+Keep `README.md` and this architecture document synchronized with the implemented engine foundation, development telemetry bridge, customer shell, and later architectural decisions. The README gives exact local setup and startup commands; this document separates current fixture behavior from the proposed physical, local-control, and central-platform target.
 
-The web shell does not imply implementation progress in hardware safety, local control, telemetry ingestion, authentication, entitlements, or billing. Future revisions should update responsibilities, interfaces, assumptions, and open decisions as those capabilities are specified and built. Branch names, remotes, repository visibility, licensing, and push timing remain repository-management decisions outside this architectural baseline.
+The C++ engine and telemetry bridge demonstrate a software-only toy plant, local stepping, and transport into the web panel. They do not imply implementation progress in independent hardware safety, qualified local control, physical telemetry integration, production authentication, entitlements, or billing. Future revisions should update responsibilities, interfaces, assumptions, and open decisions as those capabilities are specified and built. Branch names, remotes, repository visibility, licensing, and push timing remain repository-management decisions outside this architectural baseline.

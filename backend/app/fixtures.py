@@ -1,4 +1,4 @@
-"""Clearly labeled local development fixtures; no operational telemetry is simulated."""
+"""Clearly labeled local development inventory fixtures."""
 
 from dataclasses import dataclass
 
@@ -28,3 +28,6 @@ DEVICES = (
     DeviceRecord("demo-unit-002", "demo-customer-01", "Electrolyzer Module 02", "DEMO-002", None),
     DeviceRecord("demo-unit-003", "demo-customer-02", "Electrolyzer Module 03", "DEMO-003", "Other Demo Installation"),
 )
+
+# The standalone transport demo publishes only for this existing fixture.
+SIMULATED_PUBLISHER_DEVICE_ID = DEVICES[0].id
