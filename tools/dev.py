@@ -27,6 +27,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+TOOLS = Path(__file__).resolve().parent
+if str(TOOLS) not in sys.path:
+    sys.path.insert(0, str(TOOLS))
 BACKEND = ROOT / "backend"
 FRONTEND = ROOT / "frontend"
 ENGINE = ROOT / "engine"
@@ -141,10 +144,14 @@ def effective_parameters(profile: ProfileSelection, baseline_drive: float | None
     return SimulationParameters(float(values["baseline_drive"]), float(values["dt_s"]), values["period_ms"])
 
 
-def engine_command(parameters: SimulationParameters, snapshot: Path) -> list[str]:
-    return [str(ENGINE_BINARY), "--baseline-drive", repr(parameters.baseline_drive),
-            "--dt-s", repr(parameters.dt_s), "--period-ms", str(parameters.period_ms),
-            "--snapshot", str(snapshot)]
+def engine_command(parameters: SimulationParameters, snapshot: Path,
+                   recording: Path | None = None) -> list[str]:
+    command = [str(ENGINE_BINARY), "--baseline-drive", repr(parameters.baseline_drive),
+               "--dt-s", repr(parameters.dt_s), "--period-ms", str(parameters.period_ms),
+               "--snapshot", str(snapshot)]
+    if recording is not None:
+        command.extend(("--record-jsonl", str(recording)))
+    return command
 
 
 def _file_sha256(path: Path) -> str:
@@ -166,13 +173,17 @@ def make_run_metadata(run_id: str, started_at: str, profile: ProfileSelection,
                       parameters: SimulationParameters, engine_sha256: str) -> dict:
     """Allowlist-only record: no environment, tokens, customer ID, or equipment limits."""
     return {
-        "metadata_version": "1",
+        "metadata_version": "2",
         "run_id": run_id,
         "started_at": started_at,
         "status": "development_simulation_only",
         "profile": {"path": _profile_label(profile.path), "sha256": profile.sha256},
         "effective_parameters": asdict(parameters),
         "engine": {"path": "engine/build/faradix_engine", "sha256": engine_sha256},
+        "engine_run_id": None,
+        "outcome": {"state": "running"},
+        "recording": {"path": "samples.jsonl", "integrity": "unverified", "sample_count": 0,
+                      "issues": []},
     }
 
 
@@ -180,6 +191,20 @@ def write_run_metadata(path: Path, metadata: dict) -> None:
     with path.open("x", encoding="utf-8") as stream:
         json.dump(metadata, stream, indent=2, sort_keys=True, allow_nan=False)
         stream.write("\n")
+
+
+def replace_run_metadata(path: Path, metadata: dict) -> None:
+    """Atomically update the owned run record after startup or shutdown."""
+    temporary = path.with_name(path.name + ".tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(metadata, stream, indent=2, sort_keys=True, allow_nan=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def version_tuple(text: str) -> tuple[int, ...]:
@@ -228,6 +253,9 @@ def runtime_requirements() -> list[str]:
 
 def check_port_available(port: int) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        # Match server reuse behavior so closed connections in TIME_WAIT do not
+        # make a stopped runner look as though it still owns the port.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((HOST, port))
         except OSError as error:
@@ -366,6 +394,30 @@ def telemetry_ready() -> bool:
             sample.get("device_id") == DEVICE_ID and sample.get("source") == "simulated")
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def finalize_run_metadata(path: Path, metadata: dict, recording: Path,
+                          clean_stop: bool) -> None:
+    """Keep runner outcome separate from the recorder's verified integrity."""
+    from experiments import inspect_recording
+
+    expected_id = metadata["engine_run_id"]
+    inspection = inspect_recording(recording, expected_run_id=expected_id)
+    if metadata["engine_run_id"] is None:
+        metadata["engine_run_id"] = inspection["run_id"]
+    metadata["outcome"] = {"state": "cleanly_stopped" if clean_stop else "failed",
+                           "ended_at": _utc_now()}
+    metadata["recording"] = {
+        "path": recording.name,
+        "integrity": inspection["integrity"],
+        "sample_count": inspection["sample_count"],
+        "issues": inspection["issues"],
+    }
+    replace_run_metadata(path, metadata)
+
+
 def run(args: argparse.Namespace) -> int:
     profile = load_profile(args.profile)
     parameters = effective_parameters(profile, args.baseline_drive, args.dt_s, args.period_ms)
@@ -377,32 +429,45 @@ def run(args: argparse.Namespace) -> int:
     token = ensure_credential()
     engine_sha256 = _file_sha256(ENGINE_BINARY)
     run_id = uuid.uuid4().hex
-    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    started_at = _utc_now()
     base_env = os.environ.copy()
     base_env.pop(TOKEN_NAME, None)
     base_env.pop("FARADIX_DEV_TELEMETRY_INGEST", None)
     secret_env = {**base_env, TOKEN_NAME: token}
     children: list[Child] = []
-    snapshot_dir: Path | None = None
     snapshot: Path | None = None
+    recording: Path | None = None
+    metadata_path: Path | None = None
+    metadata: dict | None = None
+    engine_child: Child | None = None
+    stopped_by_user = False
     try:
         (ENGINE / "run").mkdir(exist_ok=True)
         snapshot_dir = Path(tempfile.mkdtemp(prefix=f"runner-{run_id}-", dir=ENGINE / "run"))
         snapshot = snapshot_dir / "latest.json"
+        recording = snapshot_dir / "samples.jsonl"
         metadata_path = snapshot_dir / "metadata.json"
-        write_run_metadata(metadata_path, make_run_metadata(run_id, started_at, profile, parameters, engine_sha256))
+        metadata = make_run_metadata(run_id, started_at, profile, parameters, engine_sha256)
+        write_run_metadata(metadata_path, metadata)
         print(f"[runner] Development simulation profile: {_profile_label(profile.path)}")
         print(f"[runner] Effective engine settings: baseline_drive={parameters.baseline_drive}, "
               f"dt_s={parameters.dt_s}, period_ms={parameters.period_ms}")
         print(f"[runner] Run metadata: {metadata_path}")
+        print(f"[runner] Step recording: {recording}")
         children.append(Child("backend", [str(PYTHON), "-m", "uvicorn", "app.main:app", "--app-dir", str(BACKEND),
                                           "--host", HOST, "--port", str(BACKEND_PORT)], ROOT,
                               {**secret_env, "FARADIX_DEV_TELEMETRY_INGEST": "1"}))
         wait_ready("backend", lambda: get_json(f"http://{HOST}:{BACKEND_PORT}/api/v1/health").get("status") == "ok", children)
         children.append(Child("frontend", ["npm", "run", "dev", "--", "--host", HOST, "--port", str(FRONTEND_PORT), "--strictPort"], FRONTEND, base_env))
         wait_ready("frontend", frontend_ready, children)
-        children.append(Child("engine", engine_command(parameters, snapshot), ROOT, base_env))
+        engine_child = Child("engine", engine_command(parameters, snapshot, recording), ROOT, base_env)
+        children.append(engine_child)
         wait_ready("engine snapshot", lambda: snapshot.is_file() and json.loads(snapshot.read_text(encoding="utf-8")).get("sample_sequence", 0) >= 1, children)
+        snapshot_run_id = json.loads(snapshot.read_text(encoding="utf-8")).get("run_id")
+        if not isinstance(snapshot_run_id, str) or not snapshot_run_id:
+            raise RunnerError("Engine snapshot has no run identity")
+        metadata["engine_run_id"] = snapshot_run_id
+        replace_run_metadata(metadata_path, metadata)
         children.append(Child("bridge", [str(PYTHON), str(BACKEND / "dev_publisher.py"), "--mode", "snapshot",
                                          "--snapshot", str(snapshot), "--interval", "1", "--url", f"http://{HOST}:{BACKEND_PORT}"], ROOT, secret_env))
         wait_ready("simulated telemetry", telemetry_ready, children)
@@ -414,13 +479,18 @@ def run(args: argparse.Namespace) -> int:
                     raise RunnerError(f"{child.name} exited unexpectedly (status {code}); stopping the development environment.")
             time.sleep(0.3)
     except KeyboardInterrupt:
+        stopped_by_user = True
         print("\n[runner] Stopping the development environment.")
-        return 0
     finally:
         stop_children(children)
+        engine_stopped_cleanly = engine_child is None or engine_child.process.returncode == 0
+        if metadata_path is not None and metadata is not None and recording is not None:
+            finalize_run_metadata(metadata_path, metadata, recording,
+                                  stopped_by_user and engine_stopped_cleanly)
         if snapshot is not None:
             snapshot.unlink(missing_ok=True)
-        print("[runner] Owned processes stopped; run metadata retained.")
+        print("[runner] Owned processes stopped; run metadata and recording retained.")
+    return 0
 
 
 def main() -> int:

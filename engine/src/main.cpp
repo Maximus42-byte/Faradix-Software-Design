@@ -1,4 +1,5 @@
 #include "faradix/engine.hpp"
+#include "faradix/recording_writer.hpp"
 #include "faradix/simulated_device.hpp"
 #include "faradix/snapshot_writer.hpp"
 
@@ -26,6 +27,7 @@ struct Options {
     double step_seconds = 1.0;
     double baseline_drive = 0.5;
     std::string snapshot_path;
+    std::string recording_path;
 };
 
 std::string value_for(int& index, int argc, char** argv) {
@@ -39,7 +41,8 @@ Options parse_options(int argc, char** argv) {
         const std::string option = argv[index];
         if (option == "--help") {
             std::cout << "Usage: faradix_engine [--steps 1..1000000] [--dt-s seconds] "
-                         "[--baseline-drive 0..1] [--period-ms 0..60000] [--snapshot path]\n"
+                         "[--baseline-drive 0..1] [--period-ms 0..60000] [--snapshot path] "
+                         "[--record-jsonl path]\n"
                          "Default: continuous, 1 simulation second per step, 1 wall second between steps.\n";
             std::exit(0);
         }
@@ -64,6 +67,9 @@ Options parse_options(int argc, char** argv) {
             else options.baseline_drive = number;
         } else if (option == "--snapshot") {
             options.snapshot_path = value_for(index, argc, argv);
+        } else if (option == "--record-jsonl") {
+            options.recording_path = value_for(index, argc, argv);
+            if (options.recording_path.empty()) throw std::invalid_argument("Invalid --record-jsonl path");
         } else {
             throw std::invalid_argument("Unknown option: " + option);
         }
@@ -94,6 +100,15 @@ int main(int argc, char** argv) {
         if (!options.snapshot_path.empty()) {
             writer = std::make_unique<faradix::SnapshotWriter>(options.snapshot_path, run_id);
         }
+        std::unique_ptr<faradix::RecordingWriter> recorder;
+        if (!options.recording_path.empty()) {
+            try {
+                recorder = std::make_unique<faradix::RecordingWriter>(options.recording_path, run_id);
+            } catch (const std::exception& error) {
+                std::cerr << "Development recording failed: " << error.what() << '\n';
+                return 3;
+            }
+        }
         std::signal(SIGINT, stop_handler);
         std::signal(SIGTERM, stop_handler);
         std::cout << "Uncalibrated development simulation; no physical operating limits or hard real-time guarantee.\n"
@@ -104,6 +119,14 @@ int main(int argc, char** argv) {
         while (!stop_requested && (options.steps == 0 || executed < options.steps)) {
             const auto result = engine.step();
             const auto measured_at = std::chrono::system_clock::now();
+            if (recorder) {
+                try {
+                    recorder->write(result.state, measured_at);
+                } catch (const std::exception& error) {
+                    std::cerr << "Development recording failed: " << error.what() << '\n';
+                    return 3;
+                }
+            }
             if (writer) {
                 try {
                     writer->write(result.state, measured_at);
@@ -130,6 +153,14 @@ int main(int argc, char** argv) {
                     std::this_thread::sleep_for(remaining > std::chrono::milliseconds(50)
                         ? std::chrono::milliseconds(50) : remaining);
                 }
+            }
+        }
+        if (recorder) {
+            try {
+                recorder->finish();
+            } catch (const std::exception& error) {
+                std::cerr << "Development recording failed: " << error.what() << '\n';
+                return 3;
             }
         }
         std::cout << "Stopped after " << executed << " steps (simulation_time_s="

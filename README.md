@@ -2,7 +2,7 @@
 
 Faradix sells modular physical water-electrolyzer products with local control software and a customer-facing web platform. Customers may own multiple devices or installations. Faradix also sells recurring software-service subscriptions; plan contents, pricing, billing intervals, and payment providers are undecided.
 
-- **Current repository state:** a runnable C++ engine foundation with an uncalibrated simulated device, an atomic snapshot bridge, and the customer web shell are implemented. Physical equipment control, real sensor telemetry, authentication, and commercial integrations are not.
+- **Current repository state:** a runnable C++ engine foundation with an uncalibrated simulated device, an atomic snapshot bridge, local development experiment recording, and the customer web shell are implemented. Physical equipment control, real sensor telemetry, authentication, and commercial integrations are not.
 - **Architecture document version:** 0.1, proposed. This is a document version, not a software release.
 
 ## System boundaries
@@ -13,7 +13,7 @@ The product architecture has three connected parts:
 2. **Local C++ control runtime near the equipment:** this repository now contains a standalone development engine, a replaceable device interface, one simulated-device adapter, and minimal command admission. State estimation, predictive modeling, policy, optimization, hardware adapters, and qualified real-time control remain planned.
 3. **Central customer web platform:** customer-scoped device management, remote monitoring, history, alarms, and subscription-enabled services. This repository implements an initial development shell and an in-memory synthetic telemetry demonstration.
 
-The implemented development path is **C++ toy engine → atomic JSON snapshot → Python bridge → credential-gated FastAPI ingestion → latest-sample memory store → customer-scoped read API → Device Details**. The original standalone Python synthetic publisher remains available as a separate transport demo. The toy plant is an uncalibrated development simulation, not a predictive physics model, digital twin, or equipment controller. The bridge maps engine output into the existing provisional telemetry contract; real integration remains unimplemented. Any future remote-command path must be separate from telemetry and pass backend authorization and local supervisory admission; this shell has no operational commands.
+The implemented development telemetry path is **C++ toy engine → atomic JSON snapshot → Python bridge → credential-gated FastAPI ingestion → latest-sample memory store → customer-scoped read API → Device Details**. The executable can also record each logical simulation step directly to a separate local JSON Lines experiment file; it does not reconstruct history from snapshots. The original standalone Python synthetic publisher remains available as a separate transport demo. The toy plant is an uncalibrated development simulation, not a predictive physics model, digital twin, or equipment controller. The bridge maps engine output into the existing provisional telemetry contract; real integration remains unimplemented. Any future remote-command path must be separate from telemetry and pass backend authorization and local supervisory admission; this shell has no operational commands.
 
 Independent hardware safety and basic local control must not depend on cloud availability, subscription expiry, or billing-service availability. Modeling, policy, optimization, supervisory control, and real-time control remain distinct responsibilities; only minimal development command admission is implemented. See [ARCHITECTURE_v0.1.md](ARCHITECTURE_v0.1.md) for the proposed architecture and open decisions.
 
@@ -23,7 +23,7 @@ Independent hardware safety and basic local control must not depend on cloud ava
 | --- | --- |
 | `frontend/` | React, TypeScript, and Vite customer workspace with Overview, My Devices, Device Details, and Subscription pages. Device Details polls for the latest authorized sample and distinguishes empty, fresh, stale, and API-unavailable states. |
 | `backend/` | FastAPI API for health, customer-scoped inventory and latest telemetry, plus disabled-by-default development ingestion. `dev_publisher.py` supports explicit engine snapshot mode and the earlier standalone synthetic mode. |
-| `engine/` | C++20 engine library, simulated-device adapter, snapshot writer adapter, executable, and focused tests. It runs without Python, HTTP, the backend, or a browser. |
+| `engine/` | C++20 engine library, simulated-device adapter, separate snapshot and experiment-recording output adapters, executable, and focused tests. It runs without Python, HTTP, the backend, or a browser. |
 | Development fixtures | Two customers and three device records exist on the server. The default development customer sees only its two devices. The bridge maps snapshots to the backend's existing `demo-unit-001` identity; other devices remain without samples. |
 
 Overview counts and integration summaries come from API responses. Device Details shows identity, installation, and simulated telemetry when available. History and alarms remain empty; Subscription reports **Not configured**. Synthetic values are not operating limits. No real sensor readings, physical connection states, hydrogen production, active subscriptions, payments, or optimization results are represented.
@@ -34,7 +34,7 @@ Overview counts and integration summaries come from API responses. Device Detail
 
 `GET /api/v1/devices/{device_id}/telemetry` returns the latest sample only after the existing current-customer and device-ownership check. It returns `no_samples`, `fresh`, or `stale`; freshness is measured from `measured_at` against the backend clock, with a **15-second threshold**. The panel polls every **5 seconds** by default, schedules the next poll only after the previous request finishes, and can set `VITE_TELEMETRY_POLL_MS` to an integer from 1000 to 60000 before starting Vite. A stopped publisher leaves its last sample visible as **Stale simulated data**. If the backend is unavailable, the panel retains the browser's last reading with **Backend unavailable** and no freshness claim. Backend availability is not equipment connectivity.
 
-Only the latest sample per device is held in one backend process's memory. **Samples disappear on backend restart** and are not shared across workers. The snapshot file is a separate ignored development artifact, not backend storage. The bridge publishes each newly observed run/sequence once after success, preserves the engine timestamp, retries a failed sample at most three times, and holds no backlog beyond the newest sample. If the engine stops, the bridge never changes the file or refreshes its timestamp. There is no history, queue, delivery guarantee, or persistence.
+Only the latest sample per device is held in one backend process's memory. **Samples disappear on backend restart** and are not shared across workers. The snapshot file is a separate ignored development artifact, not backend storage. The bridge publishes each newly observed run/sequence once after success, preserves the engine timestamp, retries a failed sample at most three times, and holds no backlog beyond the newest sample. If the engine stops, the bridge never changes the file or refreshes its timestamp. The backend has no history, queue, delivery guarantee, or persistence; the local experiment recording described below is a separate development artifact.
 
 ### API endpoints
 
@@ -81,7 +81,7 @@ python3 tools/dev.py run
 
 The runner checks runtime prerequisites and ports before starting anything. It reuses `backend/.env.telemetry`, or creates the file once with a restricted random credential if missing. It reads the file as data, never executes it, and passes the credential only to the backend and snapshot bridge. The file is ignored by Git. An existing file must contain a single line in the form `export FARADIX_DEV_TELEMETRY_TOKEN=<token>` and be owned by the current user with mode `0600`; the runner rejects an invalid file without overwriting it. Keep it secret and use this demo only on a trusted local machine.
 
-The runner uses a unique ignored snapshot directory under `engine/run/` for its engine instance, waits for backend, frontend, engine snapshot, and end-to-end telemetry readiness with bounded timeouts, and labels each process's output. Open **http://127.0.0.1:5173/devices/demo-unit-001**. Press Ctrl+C to stop the processes and descendants started by this runner. If startup fails or a child exits unexpectedly, it stops its other children. It never stops an unrelated process that owns a port.
+The runner uses a unique ignored run directory under `engine/run/` for its engine instance, snapshot, recording, and metadata. It waits for backend, frontend, engine snapshot, and end-to-end telemetry readiness with bounded timeouts, and labels each process's output. Open **http://127.0.0.1:5173/devices/demo-unit-001**. Press Ctrl+C to stop the processes and descendants started by this runner. If startup fails or a child exits unexpectedly, it stops its other children. It never stops an unrelated process that owns a port.
 
 ### Development simulation profiles
 
@@ -103,7 +103,35 @@ Version 1 JSON requires `schema_version: "1"`, `kind: "development_simulation"`,
 
 **Precedence:** built-in defaults (`0.5`, `1.0`, `1000`) → selected profile → explicit `run` flags `--baseline-drive`, `--dt-s`, and `--period-ms`. The runner validates both the selected profile and the effective values. These flags map directly to the engine CLI; the C++ executable remains independently runnable without Python.
 
-Each started run retains an ignored `engine/run/runner-*/metadata.json` record. It contains a runner run ID, UTC start time, selected profile path and SHA-256 hash, effective parameters actually passed to the engine, the engine executable path and SHA-256 hash, and an explicit `development_simulation_only` status. The snapshot is removed at shutdown; the small metadata record remains. It contains no credentials, full environment, customer identity, or operating limits. Matching these inputs helps reproduce a software demonstration, not establish physical validity. A wall period longer than the panel's 15-second freshness threshold can show a stale reading between valid simulation steps.
+Each started run retains ignored version 2 `engine/run/runner-*/metadata.json`. It records the runner run ID and engine run ID, UTC start time, selected profile path and SHA-256 hash, effective parameters actually passed to the engine, engine executable path and SHA-256 hash, and `development_simulation_only` status. Its outcome progresses from `running` to `cleanly_stopped` or `failed`; recording integrity is reported separately as `unverified`, `complete`, or `incomplete`, with sample count and issues. The snapshot is removed at shutdown; metadata remains, along with any recording file the engine created. Metadata contains no credentials, full environment, customer identity, or operating limits. Matching these inputs helps reproduce a software demonstration, not establish physical validity. A wall period longer than the panel's 15-second freshness threshold can show a stale reading between valid simulation steps.
+
+### Local simulation experiment recording
+
+The runner passes `--record-jsonl` to the engine and retains one version 1 JSON Lines `samples.jsonl` in its ignored run directory. The C++ output adapter writes **one line per logical simulation step at its source**, independently of the replaceable latest-snapshot file and Python bridge. The engine also runs without recording when `--record-jsonl` is omitted. A recording write failure ends the development experiment with a diagnostic; it is not a physical equipment fault or protective action.
+
+Every sample line has `record_version: "1"`, `record_type: "sample"`, the engine `run_id` tying samples to one execution, 1-based `sample_sequence`, `simulation_time_s` (elapsed simulation seconds), original UTC wall-clock `measured_at`, `source: "simulated"`, `provenance: "development_simulation"`, and `measurements`: `stack_voltage_v` (V), `stack_current_a` (A), and `electrolyte_temperature_c` (°C). A clean engine stop appends a `record_type: "completion"` line with the same version and run ID, `sample_count`, `last_sample_sequence`, and `status: "cleanly_stopped"`. These are synthetic outputs, not calibrated physical measurements or safe operating limits. The output file is created exclusively so an existing recording is never overwritten.
+
+Copy the run directory printed by `tools/dev.py run`; after stopping the runner with Ctrl+C, inspect or export it. Set `RUN_DIR` to the printed directory; neither offline command starts the backend, frontend, or bridge:
+
+```bash
+RUN_DIR='engine/run/runner-<id-printed-by-runner>'
+python3 tools/experiments.py inspect "$RUN_DIR"
+python3 tools/experiments.py export "$RUN_DIR" "$RUN_DIR/samples.csv"
+# Only when inspection reports incomplete data and its valid prefix is wanted:
+python3 tools/experiments.py export "$RUN_DIR" "$RUN_DIR/partial-samples.csv" --allow-incomplete
+```
+
+`inspect` reports the configuration and engine identity from metadata, engine run ID, valid sample count, simulation-time coverage, sequence gaps, run outcome, recording integrity, and validation issues. It exits nonzero for incomplete or unverified recordings. It detects malformed or unterminated final lines, mixed run IDs, duplicate or out-of-order sequences, sequence gaps, invalid timestamps, and nonfinite measurements. The valid prefix remains available after a damaged final record. `export` writes CSV columns `run_id`, `sample_sequence`, `simulation_time_s`, `measured_at_utc`, `stack_voltage_v`, `stack_current_a`, `electrolyte_temperature_c`, `source`, and `provenance`; the unit suffixes are seconds, volts, amperes, and degrees Celsius. It refuses incomplete data unless `--allow-incomplete` is explicit, never interpolates gaps, and never overwrites an existing CSV. An old profile-only metadata record without a recording is reported as unverified.
+
+For a standalone bounded experiment, choose a new path under the ignored `engine/run/` directory:
+
+```bash
+engine/build/faradix_engine --steps 5 --period-ms 0 --record-jsonl engine/run/manual-5-samples.jsonl
+python3 tools/experiments.py inspect engine/run/manual-5-samples.jsonl
+python3 tools/experiments.py export engine/run/manual-5-samples.jsonl engine/run/manual-5-samples.csv
+```
+
+The standalone JSONL can be inspected without runner metadata. These local recordings are development experiment artifacts, not the customer platform's planned persistent history, a validated digital twin, or evidence of physical fidelity.
 
 ### Manual startup
 

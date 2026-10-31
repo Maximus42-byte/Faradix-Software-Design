@@ -125,12 +125,14 @@ class ProfileTests(unittest.TestCase):
             profile = dev.load_profile(path)
             parameters = dev.effective_parameters(profile, baseline_drive=0.7, period_ms=750)
             snapshot = Path(directory) / "run" / "latest.json"
-            argv = dev.engine_command(parameters, snapshot)
+            recording = snapshot.parent / "samples.jsonl"
+            argv = dev.engine_command(parameters, snapshot, recording)
             flag_values = {argv[index]: argv[index + 1] for index in range(1, len(argv), 2)}
             self.assertEqual(float(flag_values["--baseline-drive"]), 0.7)
             self.assertEqual(float(flag_values["--dt-s"]), 2.0)
             self.assertEqual(int(flag_values["--period-ms"]), 750)
             self.assertEqual(Path(flag_values["--snapshot"]), snapshot)
+            self.assertEqual(Path(flag_values["--record-jsonl"]), recording)
 
             token = "supersecret-development-credential"
             with patch.dict(os.environ, {dev.TOKEN_NAME: token}):
@@ -138,8 +140,12 @@ class ProfileTests(unittest.TestCase):
                     "test-run-id", "2026-10-31T12:34:56Z", profile, parameters, "a" * 64,
                 )
             self.assertEqual(set(metadata), {"metadata_version", "run_id", "started_at",
-                                             "status", "profile", "effective_parameters", "engine"})
-            self.assertEqual(metadata["metadata_version"], "1")
+                                             "status", "profile", "effective_parameters", "engine",
+                                             "engine_run_id", "outcome", "recording"})
+            self.assertEqual(metadata["metadata_version"], "2")
+            self.assertIsNone(metadata["engine_run_id"])
+            self.assertEqual(metadata["outcome"], {"state": "running"})
+            self.assertEqual(metadata["recording"]["integrity"], "unverified")
             self.assertEqual(metadata["run_id"], "test-run-id")
             self.assertEqual(metadata["started_at"], "2026-10-31T12:34:56Z")
             self.assertEqual(metadata["status"], "development_simulation_only")

@@ -4,9 +4,9 @@
 | --- | --- |
 | Product | Modular Faradix water-electrolyzer equipment, local control runtime, and customer web platform |
 | Document version | 0.1 |
-| Status | Proposed target architecture with an implemented C++ development engine, simulated device, snapshot bridge, and customer web shell |
+| Status | Proposed target architecture with an implemented C++ development engine, simulated device, snapshot bridge, local experiment recorder, and customer web shell |
 | Prepared | 2026-10-27 |
-| Implementation status | C++20 engine foundation and toy simulated device; atomic snapshot and Python bridge into the existing development telemetry API and web panel; no hardware integration |
+| Implementation status | C++20 engine foundation and toy simulated device; atomic snapshot and Python bridge into the existing development telemetry API and web panel; source-level local JSONL recording; no hardware integration |
 | Basis | Supplied Faradix architecture context and the previously reviewed module-design draft |
 
 This is a self-contained repository document. It preserves the supplied architectural principles and distinguishes them from proposed internal designs and unresolved engineering choices. Version 0.1 identifies this document, not a software release or a finalized industrial design.
@@ -23,12 +23,12 @@ The final sensor inventory, actuator inventory, I/O topology, communication prot
 
 | Horizon | Scope |
 | --- | --- |
-| Current repository | Runnable C++ engine foundation, simulated device, snapshot bridge, and customer web shell; no physical telemetry, real authentication, billing, or subscriptions. |
+| Current repository | Runnable C++ engine foundation, simulated device, snapshot bridge, local experiment recording, and customer web shell; no physical telemetry, real authentication, billing, or subscriptions. |
 | Next local-control milestone | Add state estimation, predictive modeling, policy, optimization proposals, and richer supervisory behavior around the existing toy device boundary. |
 | Subsequent engineering | Integrate validated models, real device adapters, measured timing requirements, hardware-specific procedures, and the customer web platform. |
 | Future capabilities | Advanced optimization, calibration workflows, additional customer services, external integration, digital-twin interoperability, and optional ML assistance. |
 
-The present repository has `engine/`, `frontend/`, `backend/`, local dependencies, focused C++ and Python tests, and a simulated engine-to-panel telemetry path. It does not add a database, cloud deployment, physical telemetry, authentication, payment handling, or real hardware operation. Future capabilities listed here are not commitments to implement them immediately.
+The present repository has `engine/`, `frontend/`, `backend/`, local dependencies, focused C++ and Python tests, a simulated engine-to-panel telemetry path, and local experiment recording. It does not add a database, cloud deployment, physical telemetry, authentication, payment handling, or real hardware operation. Future capabilities listed here are not commitments to implement them immediately.
 
 ## 2. Architectural baseline
 
@@ -109,6 +109,8 @@ For software-only development, a virtual electrolyzer replaces the physical plan
 flowchart LR
     engine["C++ toy engine and simulated device"]
     snapshot["Atomic version 1 JSON snapshot"]
+    recording["Local version 1 JSONL step recording"]
+    offline["Offline inspect and CSV export"]
     bridge["Python snapshot bridge"]
     ingest["Development ingest: credential mapped to demo-unit-001"]
     latest["Latest sample in backend memory"]
@@ -117,6 +119,8 @@ flowchart LR
     panel["Device Details web panel"]
 
     engine -->|public measurements| snapshot
+    engine -->|each logical step| recording
+    recording -->|offline| offline
     snapshot -->|new run and sequence| bridge
     bridge -->|existing version 1 simulated contract| ingest
     ingest -->|validated, newer sample| latest
@@ -125,11 +129,11 @@ flowchart LR
     read -->|empty, fresh or stale| panel
 ```
 
-This development path has a deterministic toy plant and minimal command admission, but no equipment I/O, state estimator, predictive model, operating policy, optimizer, qualified real-time control, or physical safety function. The earlier standalone Python synthetic mode remains available for transport-only tests. `POST /api/v1/dev/telemetry` is disabled unless explicitly enabled and given an environment credential. The credential maps server-side to one demo device; the payload cannot assert customer ownership. The provisional envelope contains a version, device ID, timezone-aware measurement time, `simulated` source marker, and finite voltage (V), current (A), and temperature (°C) fields. Values are synthetic examples, not operating limits. The engine snapshot contains a run ID, sample sequence, simulation time, and original UTC measurement time. Its atomic file replacement and bounded Python bridge live outside the engine core. The bridge maps the snapshot to the server-owned demo device and keeps at most one pending sample; it never refreshes an unchanged snapshot. The backend latest sample survives only while its single process runs. Older or equal measurement times are rejected. `GET /api/v1/devices/{device_id}/telemetry` checks the current development customer and device ownership; it marks a sample stale after 15 seconds from its measurement time. The browser polls every 5 seconds by default without overlapping requests, retains stale readings, and shows backend unavailability separately from sample freshness. None of these states proves that physical hardware is connected. See [README.md](README.md) for setup and exact commands.
+This development path has a deterministic toy plant and minimal command admission, but no equipment I/O, state estimator, predictive model, operating policy, optimizer, qualified real-time control, or physical safety function. The earlier standalone Python synthetic mode remains available for transport-only tests. `POST /api/v1/dev/telemetry` is disabled unless explicitly enabled and given an environment credential. The credential maps server-side to one demo device; the payload cannot assert customer ownership. The provisional envelope contains a version, device ID, timezone-aware measurement time, `simulated` source marker, and finite voltage (V), current (A), and temperature (°C) fields. Values are synthetic examples, not operating limits. The engine snapshot contains a run ID, sample sequence, simulation time, and original UTC measurement time. Its atomic file replacement and bounded Python bridge live outside the engine core. The bridge maps the snapshot to the server-owned demo device and keeps at most one pending sample; it never refreshes an unchanged snapshot. The backend latest sample survives only while its single process runs. Older or equal measurement times are rejected. `GET /api/v1/devices/{device_id}/telemetry` checks the current development customer and device ownership; it marks a sample stale after 15 seconds from its measurement time. The browser polls every 5 seconds by default without overlapping requests, retains stale readings, and shows backend unavailability separately from sample freshness. None of these states proves that physical hardware is connected. The separate local recording adapter writes each logical step at its source, so intermediate samples are not reconstructed by polling the latest snapshot. It is not part of backend history, device control, or the production data-management design. See [README.md](README.md) for setup and exact commands.
 
 ### Implemented engine foundation and limits
 
-`faradix_core` advances fixed simulation steps and admits only finite dimensionless baseline drive requests from 0 to 1. `faradix_simulated_device` implements the replaceable `Device` interface; the engine sees only its public voltage, current, and temperature measurements, not hidden toy plant state. A rejected request is not applied and does not advance simulation time. `faradix_snapshot_adapter` writes complete versioned JSON to a temporary file and atomically replaces the latest snapshot. The C++ executable supports bounded steps or continuous wall-paced operation with signal-driven shutdown. It does not depend on Python, HTTP, backend availability, browser state, customer context, or subscription state. It makes no hard real-time guarantee.
+`faradix_core` advances fixed simulation steps and admits only finite dimensionless baseline drive requests from 0 to 1. `faradix_simulated_device` implements the replaceable `Device` interface; the engine sees only its public voltage, current, and temperature measurements, not hidden toy plant state. A rejected request is not applied and does not advance simulation time. `faradix_snapshot_adapter` writes complete versioned JSON to a temporary file and atomically replaces the latest snapshot. The separate `faradix_recording_adapter` can write version 1 JSON Lines with one sample per step and a completion line on a clean stop; both share development-output measurement formatting outside `faradix_core`. The C++ executable supports bounded steps or continuous wall-paced operation with signal-driven shutdown, with optional `--record-jsonl` independent of snapshot export. It does not depend on Python, HTTP, backend availability, browser state, customer context, or subscription state. It makes no hard real-time guarantee.
 
 The uncalibrated toy plant uses `I = 20u` A, `V = 40 + 0.5I + 0.01(T - 25)` V, and explicit Euler `T_next = T + dt × [0.002 I² - 0.08(T - 25)]` °C. Initial temperature is 25 °C. Here `u` is the admitted dimensionless drive and `dt` is the fixed simulation step in seconds. These coefficients and the software command range are development choices, **not validated equipment limits**. The toy plant is separate from the planned predictive physics model; it cannot establish physical accuracy. Simulation time advances only through admitted steps; UTC measurement time is captured from the wall clock for each exported sample. The Python bridge preserves that timestamp. Pending modules are state estimation, predictive modeling, operating policy, optimization proposals, full supervisory modes and fallback, real-time control, hardware I/O, and independent physical safety.
 
@@ -248,6 +252,8 @@ The simulation plant and the optimizer's prediction model have different roles. 
 Records include measurements, states, proposals, accepted targets, commands, alarms, and configuration changes. Decisions should reference the state, model, policy, and configuration that produced them.
 
 Storage failure must not block the control cycle. Queue overflow policy and loss counters must be explicit. If an operating mode requires uninterrupted audit recording, the supervisory response to recording loss must be separately defined.
+
+The implemented JSONL adapter is only a local development experiment recorder for the toy engine. Its write failure fails that development experiment with a diagnostic; it is not a physical fault or protective action. It does not provide the future production history, audit, retention, or nonblocking equipment logging described above.
 
 ### 4.12 Diagnostics and fault management
 
@@ -391,9 +397,13 @@ Remote operational commands are not a committed product feature. If offered late
 
 A reasonable future starting point is a modular local C++ runtime near the equipment, with separate execution paths for fast I/O/control, state/supervisory work, and bounded optimization jobs. Supporting local API, storage, and telemetry-export work remains outside the control cycle. The central customer web platform is a separate system, not the location of the mandatory fast loop. Module calls within a local process do not need network RPC. The current repository runs a standalone C++ toy engine and separate local-only Vite and FastAPI development servers, both servers bound to `127.0.0.1`.
 
-The development-only `tools/dev.py` runner can launch the existing backend, frontend, engine, and snapshot bridge as separate processes. It owns their startup and shutdown, uses a unique local snapshot path, and confirms telemetry readiness. It does not participate in the C++ step loop, add a production supervisor, or change the cloud-independent control boundary. The same components remain independently runnable with the manual commands in the README.
+The development-only `tools/dev.py` runner can launch the existing backend, frontend, engine, and snapshot bridge as separate processes. It owns their startup and shutdown, uses a unique ignored run directory for the snapshot, step recording, and metadata, and confirms telemetry readiness. It does not participate in the C++ step loop, add a production supervisor, or change the cloud-independent control boundary. The same components remain independently runnable with the manual commands in the README.
 
-Version 1 development simulation profiles are parsed and validated by the Python runner before process launch. They select only existing C++ CLI inputs: baseline drive, simulation timestep, and positive wall pacing for the continuous run. Built-in defaults, profile values, and explicit runner CLI overrides have that precedence. Neither profiles nor runner metadata configure customer identity, telemetry credentials, plant equations, hardware safety, or physical operating limits. Each run retains an ignored metadata record with its profile and engine hashes, effective CLI inputs, UTC start time, and simulation-only status; this supports software reproduction context, not model calibration or physical validation. The C++ engine does not parse profiles or depend on Python.
+Version 1 development simulation profiles are parsed and validated by the Python runner before process launch. They select only existing C++ CLI inputs: baseline drive, simulation timestep, and positive wall pacing for the continuous run. Built-in defaults, profile values, and explicit runner CLI overrides have that precedence. Neither profiles nor runner metadata configure customer identity, telemetry credentials, plant equations, hardware safety, or physical operating limits. The C++ engine does not parse profiles or depend on Python.
+
+Each run retains a version 2 ignored metadata record with its runner and engine run IDs, profile and engine hashes, effective CLI inputs, UTC start time, explicit simulation-only status, outcome (`running`, `cleanly_stopped`, or `failed`), and separate recording integrity (`unverified`, `complete`, or `incomplete`). The runner deletes the latest snapshot at shutdown but retains metadata and any recording created by the engine. These records support software reproduction context, not model calibration or physical validation; they contain no credentials or full environment. Older profile-only metadata without recording remains unverified.
+
+Version 1 recording samples identify the engine run, sequence, simulation seconds, UTC measurement time, simulated development provenance, and finite voltage (V), current (A), and temperature (°C). A clean completion line gives the sample count and last sequence. Offline inspection detects malformed or truncated lines, mixed run IDs, duplicate or out-of-order sequences, gaps, and footer mismatches. CSV export of an incomplete valid prefix requires an explicit flag and never overwrites an existing file.
 
 Use coherent snapshots, bounded queues, and a target mailbox with explicit ownership and synchronization. A thread separation alone does not isolate process crashes, memory corruption, resource exhaustion, or all scheduling interference. Consider a separate worker process when Python integration, blocking libraries, or fault-isolation requirements justify it.
 
