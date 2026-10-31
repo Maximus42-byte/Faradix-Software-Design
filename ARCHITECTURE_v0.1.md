@@ -391,6 +391,8 @@ Remote operational commands are not a committed product feature. If offered late
 
 A reasonable future starting point is a modular local C++ runtime near the equipment, with separate execution paths for fast I/O/control, state/supervisory work, and bounded optimization jobs. Supporting local API, storage, and telemetry-export work remains outside the control cycle. The central customer web platform is a separate system, not the location of the mandatory fast loop. Module calls within a local process do not need network RPC. The current repository runs a standalone C++ toy engine and separate local-only Vite and FastAPI development servers, both servers bound to `127.0.0.1`.
 
+The development-only `tools/dev.py` runner can launch the existing backend, frontend, engine, and snapshot bridge as separate processes. It owns their startup and shutdown, uses a unique local snapshot path, and confirms telemetry readiness. It does not participate in the C++ step loop, add a production supervisor, or change the cloud-independent control boundary. The same components remain independently runnable with the manual commands in the README.
+
 Use coherent snapshots, bounded queues, and a target mailbox with explicit ownership and synchronization. A thread separation alone does not isolate process crashes, memory corruption, resource exhaustion, or all scheduling interference. Consider a separate worker process when Python integration, blocking libraries, or fault-isolation requirements justify it.
 
 Control, supervisory, and optimization periods may differ. Numeric periods, deadlines, worst-case execution budgets, jitter limits, queue capacities, and scheduling policy are **TBD**. C++ or a real-time kernel alone does not establish deterministic behavior.

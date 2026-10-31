@@ -50,65 +50,83 @@ Only the latest sample per device is held in one backend process's memory. **Sam
 
 ## Run locally
 
-Setup was verified with GCC 11.4, CMake 3.22.1, Node.js 22.23.2, and Python 3.10.12. CMake 3.22+ and a C++20 compiler are required for the engine; Vite supports Node.js 20.19+ or 22.12+. From the repository root:
+The development runner starts four independent local processes: FastAPI, Vite, the C++ toy engine, and the Python snapshot bridge. It is a process convenience for the simulated demo, **not** part of the engine's control loop or a production deployment system. The engine remains independently runnable. Both servers bind to `127.0.0.1`.
+
+### Prerequisites and setup
+
+Use Python 3.10+, CMake 3.22+, `g++-11` with C++20 support, Node.js 20.19+ or 22.12+, and npm. This Ubuntu host has Python 3.10, GCC 11, Node.js 22, and system CMake 3.22.1. On Ubuntu 22.04, install the required build and Python packages explicitly (the available CMake package is 3.22.1):
+
+```bash
+sudo apt update
+sudo apt install cmake g++-11 python3-venv python3-pip
+```
+
+Install a supported Node.js and npm distribution separately if `node --version` and `npm --version` do not show compatible versions. The runner does not install packages, download fallback tools, or use a temporary `/tmp` CMake binary. From the repository root, create the project dependencies and build the engine:
 
 ```bash
 python3 -m venv backend/.venv
 backend/.venv/bin/python -m pip install -r backend/requirements-dev.txt
-cd frontend && npm ci && cd ..
+(cd frontend && npm ci)
+python3 tools/dev.py build
+python3 tools/dev.py check
 ```
 
-Create a local credential file once from the repository root. It is ignored by Git; do not commit or paste its contents into logs. Use only on a trusted local development machine:
+`check` reports missing tools, dependencies, the built engine, or occupied local ports. Run it again after fixing any reported prerequisite; it does not change the system. `build` runs CMake with `g++-11` and writes ignored output under `engine/build/`. You can invoke either command by absolute script path from another working directory, including when the repository path contains spaces.
+
+### One-command development run
 
 ```bash
-umask 077
-printf 'export FARADIX_DEV_TELEMETRY_TOKEN=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" > backend/.env.telemetry
+python3 tools/dev.py run
 ```
 
-Build and test the engine from the repository root:
+The runner checks runtime prerequisites and ports before starting anything. It reuses `backend/.env.telemetry`, or creates the file once with a restricted random credential if missing. It reads the file as data, never executes it, and passes the credential only to the backend and snapshot bridge. The file is ignored by Git. An existing file must contain a single line in the form `export FARADIX_DEV_TELEMETRY_TOKEN=<token>` and be owned by the current user with mode `0600`; the runner rejects an invalid file without overwriting it. Keep it secret and use this demo only on a trusted local machine.
+
+The runner uses a unique ignored snapshot directory under `engine/run/` for its engine instance, waits for backend, frontend, engine snapshot, and end-to-end telemetry readiness with bounded timeouts, and labels each process's output. Open **http://127.0.0.1:5173/devices/demo-unit-001**. Press Ctrl+C to stop the processes and descendants started by this runner. If startup fails or a child exits unexpectedly, it stops its other children. It never stops an unrelated process that owns a port.
+
+### Manual startup
+
+The original four-process workflow remains available. Create the same local credential only if `backend/.env.telemetry` does not already exist:
 
 ```bash
-cmake -S engine -B engine/build -DCMAKE_CXX_COMPILER=g++-11 -DCMAKE_BUILD_TYPE=Debug
-cmake --build engine/build --parallel
-ctest --test-dir engine/build --output-on-failure
+(set -C; umask 077; printf 'export FARADIX_DEV_TELEMETRY_TOKEN=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" > backend/.env.telemetry)
 ```
 
-Start these **four processes** in separate terminals, each from the repository root. Terminal 1, backend with ingestion explicitly enabled:
+In separate terminals, each starting from the repository root:
 
 ```bash
+# Terminal 1: development backend
 source backend/.env.telemetry
 FARADIX_DEV_TELEMETRY_INGEST=1 backend/.venv/bin/python -m uvicorn app.main:app --app-dir backend --host 127.0.0.1 --port 8000
 ```
 
-Terminal 2, customer web application:
-
 ```bash
+# Terminal 2: customer web application
 cd frontend
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 ```
 
-Terminal 3, continuous C++ engine and atomic snapshot writer:
-
 ```bash
+# Terminal 3: C++ engine and atomic snapshot writer
 engine/build/faradix_engine --baseline-drive 0.5 --dt-s 1 --period-ms 1000 --snapshot engine/run/latest.json
 ```
 
-Terminal 4, Python snapshot bridge to the existing ingestion endpoint:
-
 ```bash
+# Terminal 4: Python bridge
 source backend/.env.telemetry
 backend/.venv/bin/python backend/dev_publisher.py --mode snapshot --snapshot engine/run/latest.json --interval 1
 ```
 
-For a bounded engine run without any backend or bridge, use `engine/build/faradix_engine --steps 5 --period-ms 0`. The earlier Python-only transport demo remains available with `backend/.venv/bin/python backend/dev_publisher.py --mode synthetic --interval 2` after sourcing the same credential.
+For a bounded engine run without any backend or bridge, use `engine/build/faradix_engine --steps 5 --period-ms 0`. The earlier Python-only transport demo remains available with `backend/.venv/bin/python backend/dev_publisher.py --mode synthetic --interval 2` after sourcing the credential. The manual engine snapshot path differs from each runner-created path, so the runner never consumes or overwrites a manual instance's snapshot.
 
-Open **http://127.0.0.1:5173/devices/demo-unit-001**. Stop only Terminal 3 to see the last reading become stale after 15 seconds (the next poll may add up to 5 seconds), even while the bridge stays running. Restart the engine to see fresh readings with a new run ID. Stop the backend to confirm that the engine continues stepping independently. `demo-unit-002` stays empty. The API health endpoint is **http://127.0.0.1:8000/api/v1/health**; the local API reference is at **http://127.0.0.1:8000/docs**. Vite proxies `/api` requests to the local backend. Both servers bind to `127.0.0.1`. Without `FARADIX_DEV_TELEMETRY_INGEST=1` and a configured token, ingestion returns `404`; customer reads still work.
+Stop only the engine to see the last reading become stale after 15 seconds (the next panel poll may add up to 5 seconds). Restart it to see fresh readings with a new run ID. Stop the backend to confirm that the engine continues stepping independently. `demo-unit-002` stays empty. The API health endpoint is **http://127.0.0.1:8000/api/v1/health**; the local API reference is **http://127.0.0.1:8000/docs**. Vite proxies `/api` requests to the local backend. Without `FARADIX_DEV_TELEMETRY_INGEST=1` and a configured token, ingestion returns `404`; customer reads still work.
 
-To verify from the repository root:
+To run focused development checks from the repository root:
 
 ```bash
-cd backend && .venv/bin/python -m pytest -q
-cd ../frontend && npm run build
+python3 -m unittest discover -s tools/tests -v
+(cd backend && .venv/bin/python -m pytest -q)
+(cd frontend && npm run build)
+ctest --test-dir engine/build --output-on-failure
 ```
 
 ## Development data and access limits
