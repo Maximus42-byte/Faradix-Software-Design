@@ -33,13 +33,13 @@
 
 namespace {
 
-bool near(double left, double right) { return std::abs(left - right) < 1e-9; }
+bool approximately_equal(double left, double right) { return std::abs(left - right) < 1e-9; }
 
 class RecordingDevice final : public faradix::Device {
 public:
     faradix::Measurements measure() const override { return {40.0, applied_drive_ * 20.0, 25.0}; }
     void advance(double seconds, faradix::AdmittedCommand command) override {
-        assert(near(seconds, 0.25));
+        assert(approximately_equal(seconds, 0.25));
         applied_drive_ = command.drive_fraction;
         ++calls;
     }
@@ -57,14 +57,14 @@ void deterministic_simulation() {
         const auto left = a.step().state;
         const auto right = b.step().state;
         assert(left.sample_sequence == static_cast<unsigned>(index));
-        assert(near(left.simulation_time_s, index));
-        assert(near(left.measurements.stack_voltage_v, right.measurements.stack_voltage_v));
-        assert(near(left.measurements.stack_current_a, right.measurements.stack_current_a));
-        assert(near(left.measurements.electrolyte_temperature_c, right.measurements.electrolyte_temperature_c));
-        assert(near(left.measurements.stack_current_a, 10.0));
+        assert(approximately_equal(left.simulation_time_s, index));
+        assert(approximately_equal(left.measurements.stack_voltage_v, right.measurements.stack_voltage_v));
+        assert(approximately_equal(left.measurements.stack_current_a, right.measurements.stack_current_a));
+        assert(approximately_equal(left.measurements.electrolyte_temperature_c, right.measurements.electrolyte_temperature_c));
+        assert(approximately_equal(left.measurements.stack_current_a, 10.0));
         if (index == 1) {
-            assert(near(left.measurements.electrolyte_temperature_c, 25.2));
-            assert(near(left.measurements.stack_voltage_v, 45.002));
+            assert(approximately_equal(left.measurements.electrolyte_temperature_c, 25.2));
+            assert(approximately_equal(left.measurements.stack_voltage_v, 45.002));
         }
     }
 }
@@ -74,7 +74,7 @@ void command_admission_and_device_boundary() {
     faradix::Engine engine(device, {0.25, 0.3});
     const auto accepted = engine.step(faradix::RequestedCommand{0.7});
     assert(accepted.admitted && device.calls == 1);
-    assert(near(accepted.state.measurements.stack_current_a, 14.0));
+    assert(approximately_equal(accepted.state.measurements.stack_current_a, 14.0));
     const auto rejected = engine.step(faradix::RequestedCommand{std::numeric_limits<double>::quiet_NaN()});
     assert(!rejected.admitted && device.calls == 1 && rejected.state.sample_sequence == 1);
     assert(!engine.step(faradix::RequestedCommand{1.1}).admitted);
@@ -91,7 +91,7 @@ void bounded_steps() {
         assert(result.state.sample_sequence == static_cast<unsigned>(callbacks));
     }) == 4);
     assert(callbacks == 4);
-    assert(near(engine.current().simulation_time_s, 2.0));
+    assert(approximately_equal(engine.current().simulation_time_s, 2.0));
     assert(engine.run_steps(0, [&](const faradix::StepResult&) { assert(false); }) == 0);
     assert(engine.current().sample_sequence == 4);
     bool rejected_config = false;
