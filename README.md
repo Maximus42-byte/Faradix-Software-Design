@@ -83,6 +83,28 @@ The runner checks runtime prerequisites and ports before starting anything. It r
 
 The runner uses a unique ignored snapshot directory under `engine/run/` for its engine instance, waits for backend, frontend, engine snapshot, and end-to-end telemetry readiness with bounded timeouts, and labels each process's output. Open **http://127.0.0.1:5173/devices/demo-unit-001**. Press Ctrl+C to stop the processes and descendants started by this runner. If startup fails or a child exits unexpectedly, it stops its other children. It never stops an unrelated process that owns a port.
 
+### Development simulation profiles
+
+With no `--profile`, `run` selects [the default profile](profiles/simulation/default.json), matching the earlier runner values: baseline drive `0.5`, simulation timestep `1.0` second, and wall pacing `1000` milliseconds. Two additional **development simulation** examples are [lower drive](profiles/simulation/lower_drive_demo.json) and [faster pacing](profiles/simulation/fast_pacing_demo.json). These are software test inputs, not equipment operating points, safety limits, calibrated plant settings, or physical-fidelity claims.
+
+```bash
+python3 tools/dev.py run --profile profiles/simulation/lower_drive_demo.json
+python3 tools/dev.py run --profile profiles/simulation/fast_pacing_demo.json --baseline-drive 0.4 --period-ms 500
+```
+
+Profile paths are resolved relative to the repository root, regardless of the current working directory. Absolute paths are also accepted, including from outside the repository (quote paths containing spaces):
+
+```bash
+cd /tmp
+python3 "/home/maximus/Projects/Faradix Software Design/tools/dev.py" run --profile "/home/maximus/Projects/Faradix Software Design/profiles/simulation/fast_pacing_demo.json"
+```
+
+Version 1 JSON requires `schema_version: "1"`, `kind: "development_simulation"`, and a nonempty `parameters` object. Only `baseline_drive` (finite number from 0 to 1), `dt_s` (finite number greater than 0, in simulation seconds), and `period_ms` (integer from 1 to 60000, wall milliseconds) are allowed. The continuous runner cannot use the engine's `period_ms: 0` bounded-run option. Missing parameter fields inherit runner defaults. Unknown or duplicate fields, booleans used as numbers, nonfinite values, unsupported versions, and out-of-range values are rejected before launching the environment. Profiles cannot set credentials, customer identity, snapshot paths, step count, plant equations, or equipment limits.
+
+**Precedence:** built-in defaults (`0.5`, `1.0`, `1000`) → selected profile → explicit `run` flags `--baseline-drive`, `--dt-s`, and `--period-ms`. The runner validates both the selected profile and the effective values. These flags map directly to the engine CLI; the C++ executable remains independently runnable without Python.
+
+Each started run retains an ignored `engine/run/runner-*/metadata.json` record. It contains a runner run ID, UTC start time, selected profile path and SHA-256 hash, effective parameters actually passed to the engine, the engine executable path and SHA-256 hash, and an explicit `development_simulation_only` status. The snapshot is removed at shutdown; the small metadata record remains. It contains no credentials, full environment, customer identity, or operating limits. Matching these inputs helps reproduce a software demonstration, not establish physical validity. A wall period longer than the panel's 15-second freshness threshold can show a stale reading between valid simulation steps.
+
 ### Manual startup
 
 The original four-process workflow remains available. Create the same local credential only if `backend/.env.telemetry` does not already exist:

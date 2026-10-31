@@ -4,7 +4,11 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -18,6 +22,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
@@ -34,10 +39,147 @@ BACKEND_PORT = 8000
 FRONTEND_PORT = 5173
 TOKEN_NAME = "FARADIX_DEV_TELEMETRY_TOKEN"
 TOKEN_PATTERN = re.compile(r"export FARADIX_DEV_TELEMETRY_TOKEN=([A-Za-z0-9_-]+)\n?")
+DEFAULT_PROFILE = ROOT / "profiles" / "simulation" / "default.json"
+PROFILE_KEYS = {"schema_version", "kind", "parameters"}
+PARAMETER_KEYS = {"baseline_drive", "dt_s", "period_ms"}
 
 
 class RunnerError(Exception):
     """A checked development setup or startup failure."""
+
+
+@dataclass(frozen=True)
+class ProfileSelection:
+    path: Path
+    sha256: str
+    parameters: dict[str, float | int]
+
+
+@dataclass(frozen=True)
+class SimulationParameters:
+    baseline_drive: float
+    dt_s: float
+    period_ms: int
+
+
+def _unique_keys(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate field '{key}'")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> object:
+    raise ValueError(f"non-finite JSON value {value}")
+
+
+def _validate_parameter(name: str, value: object, context: str) -> None:
+    if name == "period_ms":
+        if type(value) is not int or not 1 <= value <= 60000:
+            raise RunnerError(f"{context}: period_ms must be an integer from 1 to 60000 for a continuous run")
+        return
+    try:
+        finite = type(value) in (int, float) and math.isfinite(value)
+    except (OverflowError, TypeError, ValueError):
+        finite = False
+    if not finite:
+        raise RunnerError(f"{context}: {name} must be a finite number")
+    if name == "baseline_drive" and not 0 <= value <= 1:
+        raise RunnerError(f"{context}: baseline_drive must be from 0 to 1 (development command fraction)")
+    if name == "dt_s" and value <= 0:
+        raise RunnerError(f"{context}: dt_s must be greater than 0 seconds")
+
+
+def load_profile(path: Path | None) -> ProfileSelection:
+    """Resolve relative paths at the repository root and validate version 1 JSON."""
+    selected = DEFAULT_PROFILE if path is None else path
+    resolved = (selected if selected.is_absolute() else ROOT / selected).resolve()
+    try:
+        raw = resolved.read_bytes()
+    except OSError as error:
+        raise RunnerError(f"Cannot read simulation profile {resolved}: {error.strerror or error}") from error
+    if len(raw) > 65536:
+        raise RunnerError(f"Simulation profile {resolved} is too large (maximum 64 KiB)")
+    try:
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_keys,
+                          parse_constant=_reject_constant)
+    except (UnicodeError, ValueError) as error:
+        raise RunnerError(f"Invalid simulation profile {resolved}: {error}") from error
+    if not isinstance(data, dict):
+        raise RunnerError(f"Simulation profile {resolved}: root must be a JSON object")
+    unknown = sorted(set(data) - PROFILE_KEYS)
+    missing = sorted(PROFILE_KEYS - set(data))
+    if unknown or missing:
+        raise RunnerError(f"Simulation profile {resolved}: unknown fields {unknown}; missing fields {missing}")
+    if data["schema_version"] != "1":
+        raise RunnerError(f"Simulation profile {resolved}: unsupported schema_version; expected '1'")
+    if data["kind"] != "development_simulation":
+        raise RunnerError(f"Simulation profile {resolved}: kind must be 'development_simulation'")
+    parameters = data["parameters"]
+    if not isinstance(parameters, dict) or not parameters:
+        raise RunnerError(f"Simulation profile {resolved}: parameters must be a nonempty JSON object")
+    unknown = sorted(set(parameters) - PARAMETER_KEYS)
+    if unknown:
+        raise RunnerError(f"Simulation profile {resolved}: unsupported parameter(s): {', '.join(unknown)}")
+    for name, value in parameters.items():
+        _validate_parameter(name, value, f"Simulation profile {resolved}")
+    return ProfileSelection(resolved, hashlib.sha256(raw).hexdigest(), parameters)
+
+
+def effective_parameters(profile: ProfileSelection, baseline_drive: float | None = None,
+                         dt_s: float | None = None, period_ms: int | None = None) -> SimulationParameters:
+    """Apply engine defaults, selected profile, then explicit runner CLI flags."""
+    values = {"baseline_drive": 0.5, "dt_s": 1.0, "period_ms": 1000}
+    values.update(profile.parameters)
+    for name, override in (("baseline_drive", baseline_drive), ("dt_s", dt_s), ("period_ms", period_ms)):
+        if override is not None:
+            values[name] = override
+    for name, value in values.items():
+        _validate_parameter(name, value, "Effective simulation settings")
+    return SimulationParameters(float(values["baseline_drive"]), float(values["dt_s"]), values["period_ms"])
+
+
+def engine_command(parameters: SimulationParameters, snapshot: Path) -> list[str]:
+    return [str(ENGINE_BINARY), "--baseline-drive", repr(parameters.baseline_drive),
+            "--dt-s", repr(parameters.dt_s), "--period-ms", str(parameters.period_ms),
+            "--snapshot", str(snapshot)]
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _profile_label(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def make_run_metadata(run_id: str, started_at: str, profile: ProfileSelection,
+                      parameters: SimulationParameters, engine_sha256: str) -> dict:
+    """Allowlist-only record: no environment, tokens, customer ID, or equipment limits."""
+    return {
+        "metadata_version": "1",
+        "run_id": run_id,
+        "started_at": started_at,
+        "status": "development_simulation_only",
+        "profile": {"path": _profile_label(profile.path), "sha256": profile.sha256},
+        "effective_parameters": asdict(parameters),
+        "engine": {"path": "engine/build/faradix_engine", "sha256": engine_sha256},
+    }
+
+
+def write_run_metadata(path: Path, metadata: dict) -> None:
+    with path.open("x", encoding="utf-8") as stream:
+        json.dump(metadata, stream, indent=2, sort_keys=True, allow_nan=False)
+        stream.write("\n")
 
 
 def version_tuple(text: str) -> tuple[int, ...]:
@@ -224,31 +366,42 @@ def telemetry_ready() -> bool:
             sample.get("device_id") == DEVICE_ID and sample.get("source") == "simulated")
 
 
-def run() -> int:
+def run(args: argparse.Namespace) -> int:
+    profile = load_profile(args.profile)
+    parameters = effective_parameters(profile, args.baseline_drive, args.dt_s, args.period_ms)
     issues = runtime_requirements()
     if issues:
         raise RunnerError("\n".join(issues))
     for port in (BACKEND_PORT, FRONTEND_PORT):
         check_port_available(port)
     token = ensure_credential()
+    engine_sha256 = _file_sha256(ENGINE_BINARY)
+    run_id = uuid.uuid4().hex
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     base_env = os.environ.copy()
     base_env.pop(TOKEN_NAME, None)
     base_env.pop("FARADIX_DEV_TELEMETRY_INGEST", None)
     secret_env = {**base_env, TOKEN_NAME: token}
     children: list[Child] = []
     snapshot_dir: Path | None = None
+    snapshot: Path | None = None
     try:
         (ENGINE / "run").mkdir(exist_ok=True)
-        snapshot_dir = Path(tempfile.mkdtemp(prefix="runner-", dir=ENGINE / "run"))
+        snapshot_dir = Path(tempfile.mkdtemp(prefix=f"runner-{run_id}-", dir=ENGINE / "run"))
         snapshot = snapshot_dir / "latest.json"
+        metadata_path = snapshot_dir / "metadata.json"
+        write_run_metadata(metadata_path, make_run_metadata(run_id, started_at, profile, parameters, engine_sha256))
+        print(f"[runner] Development simulation profile: {_profile_label(profile.path)}")
+        print(f"[runner] Effective engine settings: baseline_drive={parameters.baseline_drive}, "
+              f"dt_s={parameters.dt_s}, period_ms={parameters.period_ms}")
+        print(f"[runner] Run metadata: {metadata_path}")
         children.append(Child("backend", [str(PYTHON), "-m", "uvicorn", "app.main:app", "--app-dir", str(BACKEND),
                                           "--host", HOST, "--port", str(BACKEND_PORT)], ROOT,
                               {**secret_env, "FARADIX_DEV_TELEMETRY_INGEST": "1"}))
         wait_ready("backend", lambda: get_json(f"http://{HOST}:{BACKEND_PORT}/api/v1/health").get("status") == "ok", children)
         children.append(Child("frontend", ["npm", "run", "dev", "--", "--host", HOST, "--port", str(FRONTEND_PORT), "--strictPort"], FRONTEND, base_env))
         wait_ready("frontend", frontend_ready, children)
-        children.append(Child("engine", [str(ENGINE_BINARY), "--baseline-drive", "0.5", "--dt-s", "1", "--period-ms", "1000",
-                                         "--snapshot", str(snapshot)], ROOT, base_env))
+        children.append(Child("engine", engine_command(parameters, snapshot), ROOT, base_env))
         wait_ready("engine snapshot", lambda: snapshot.is_file() and json.loads(snapshot.read_text(encoding="utf-8")).get("sample_sequence", 0) >= 1, children)
         children.append(Child("bridge", [str(PYTHON), str(BACKEND / "dev_publisher.py"), "--mode", "snapshot",
                                          "--snapshot", str(snapshot), "--interval", "1", "--url", f"http://{HOST}:{BACKEND_PORT}"], ROOT, secret_env))
@@ -265,17 +418,26 @@ def run() -> int:
         return 0
     finally:
         stop_children(children)
-        if snapshot_dir is not None:
-            shutil.rmtree(snapshot_dir)
-        print("[runner] Owned processes stopped.")
+        if snapshot is not None:
+            snapshot.unlink(missing_ok=True)
+        print("[runner] Owned processes stopped; run metadata retained.")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("check", "build", "run"))
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("check", help="check build and run prerequisites")
+    commands.add_parser("build", help="configure and build the C++ engine")
+    run_parser = commands.add_parser("run", help="start the local simulated development environment")
+    run_parser.add_argument("--profile", type=Path, help="versioned JSON path; relative paths use the repository root")
+    run_parser.add_argument("--baseline-drive", type=float, help="override development drive fraction, 0 to 1")
+    run_parser.add_argument("--dt-s", type=float, help="override positive simulation seconds per step")
+    run_parser.add_argument("--period-ms", type=int, help="override wall pacing in milliseconds, 1 to 60000")
     args = parser.parse_args()
     try:
-        return {"check": check, "build": build, "run": run}[args.command]()
+        if args.command == "run":
+            return run(args)
+        return {"check": check, "build": build}[args.command]()
     except (RunnerError, OSError, subprocess.CalledProcessError) as error:
         print(f"[runner] {error}", file=sys.stderr)
         return 1

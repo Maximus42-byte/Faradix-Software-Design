@@ -13,6 +13,7 @@ import unittest
 SCRIPT = Path(__file__).resolve().parents[1] / "dev.py"
 spec = importlib.util.spec_from_file_location("faradix_dev", SCRIPT)
 dev = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = dev
 spec.loader.exec_module(dev)
 
 
