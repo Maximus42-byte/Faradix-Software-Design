@@ -26,9 +26,15 @@ std::string utc_timestamp(std::chrono::system_clock::time_point point) {
     const auto micros = duration_cast<microseconds>(point - whole_seconds).count();
     const std::time_t epoch_seconds = system_clock::to_time_t(whole_seconds);
     std::tm utc{};
+#ifdef _WIN32
+    if (gmtime_s(&utc, &epoch_seconds) != 0) {
+        throw std::runtime_error("Cannot format UTC measurement time");
+    }
+#else
     if (gmtime_r(&epoch_seconds, &utc) == nullptr) {
         throw std::runtime_error("Cannot format UTC measurement time");
     }
+#endif
     std::ostringstream output;
     output << std::put_time(&utc, "%Y-%m-%dT%H:%M:%S") << '.'
            << std::setw(6) << std::setfill('0') << micros << 'Z';

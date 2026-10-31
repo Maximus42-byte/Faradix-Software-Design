@@ -126,13 +126,15 @@ class ProfileTests(unittest.TestCase):
             parameters = dev.effective_parameters(profile, baseline_drive=0.7, period_ms=750)
             snapshot = Path(directory) / "run" / "latest.json"
             recording = snapshot.parent / "samples.jsonl"
-            argv = dev.engine_command(parameters, snapshot, recording)
+            stop_file = snapshot.parent / "engine-stop.request"
+            argv = dev.engine_command(parameters, snapshot, recording, stop_file)
             flag_values = {argv[index]: argv[index + 1] for index in range(1, len(argv), 2)}
             self.assertEqual(float(flag_values["--baseline-drive"]), 0.7)
             self.assertEqual(float(flag_values["--dt-s"]), 2.0)
             self.assertEqual(int(flag_values["--period-ms"]), 750)
             self.assertEqual(Path(flag_values["--snapshot"]), snapshot)
             self.assertEqual(Path(flag_values["--record-jsonl"]), recording)
+            self.assertEqual(Path(flag_values["--stop-file"]), stop_file)
 
             token = "supersecret-development-credential"
             with patch.dict(os.environ, {dev.TOKEN_NAME: token}):

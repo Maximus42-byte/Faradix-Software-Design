@@ -52,34 +52,51 @@ Only the latest sample per device is held in one backend process's memory. **Sam
 
 The development runner starts four independent local processes: FastAPI, Vite, the C++ toy engine, and the Python snapshot bridge. It is a process convenience for the simulated demo, **not** part of the engine's control loop or a production deployment system. The engine remains independently runnable. Both servers bind to `127.0.0.1`.
 
-### Prerequisites and setup
+### Linux setup (Ubuntu)
 
-Use Python 3.10+, CMake 3.22+, `g++-11` with C++20 support, Node.js 20.19+ or 22.12+, and npm. This Ubuntu host has Python 3.10, GCC 11, Node.js 22, and system CMake 3.22.1. On Ubuntu 22.04, install the required build and Python packages explicitly (the available CMake package is 3.22.1):
+Use Python 3.10+, CMake 3.22+, `g++-11` with C++20 support, Node.js 20.19+ or 22.12+, and npm. Install the Ubuntu build and Python prerequisites explicitly; install a supported Node.js distribution separately if needed:
 
 ```bash
 sudo apt update
 sudo apt install cmake g++-11 python3-venv python3-pip
-```
-
-Install a supported Node.js and npm distribution separately if `node --version` and `npm --version` do not show compatible versions. The runner does not install packages, download fallback tools, or use a temporary `/tmp` CMake binary. From the repository root, create the project dependencies and build the engine:
-
-```bash
 python3 -m venv backend/.venv
 backend/.venv/bin/python -m pip install -r backend/requirements-dev.txt
 (cd frontend && npm ci)
 python3 tools/dev.py build
 python3 tools/dev.py check
-```
-
-`check` reports missing tools, dependencies, the built engine, or occupied local ports. Run it again after fixing any reported prerequisite; it does not change the system. `build` runs CMake with `g++-11` and writes ignored output under `engine/build/`. You can invoke either command by absolute script path from another working directory, including when the repository path contains spaces.
-
-### One-command development run
-
-```bash
 python3 tools/dev.py run
 ```
 
-The runner checks runtime prerequisites and ports before starting anything. It reuses `backend/.env.telemetry`, or creates the file once with a restricted random credential if missing. It reads the file as data, never executes it, and passes the credential only to the backend and snapshot bridge. The file is ignored by Git. An existing file must contain a single line in the form `export FARADIX_DEV_TELEMETRY_TOKEN=<token>` and be owned by the current user with mode `0600`; the runner rejects an invalid file without overwriting it. Keep it secret and use this demo only on a trusted local machine.
+The Linux build keeps the `g++-11` compiler choice and writes ignored output under `engine/build/`. The runner can also be invoked by absolute script path from another working directory, including when the repository path contains spaces.
+
+### Native Windows x64 setup (PowerShell)
+
+Install Python 3.10+ (Python 3.12 is used by CI), CMake 3.22+, Node.js 22 with npm, and Visual Studio 2022 with the **Desktop development with C++** workload. Make `python`, `cmake`, `node`, and `npm` available on `PATH`. Use native PowerShell, not WSL. From the repository root:
+
+```powershell
+python --version
+cmake --version
+node --version
+npm --version
+python -m venv backend\.venv
+backend\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
+Push-Location frontend
+npm ci
+Pop-Location
+python tools\dev.py build
+python tools\dev.py check
+python tools\dev.py run
+```
+
+The runner uses the installed CMake generator and its Debug executable location for either a single-configuration or multi-configuration build. Windows virtual environments use `Scripts\python.exe`; the runner discovers that path and launches Vite with Node using an argument list. All four development processes remain local to `127.0.0.1`.
+
+`check` reports missing prerequisites, a missing engine binary, or occupied local ports without changing the system. `build` configures and builds the standalone C++ engine; it does not install tools or download fallback binaries. The runner creates or reuses the ignored `backend/.env.telemetry` file. On Linux it requires current-user ownership and mode `0600`. On Windows it protects a new empty file with a restricted ACL before writing the credential and verifies an existing file's owner and ACL without rewriting it; POSIX mode bits are not used as a Windows security check. Keep the credential secret and use this demo on a trusted local machine.
+
+### One-command development run
+
+Run `python3 tools/dev.py run` on Linux or `python tools\dev.py run` in native Windows PowerShell after setup. Both use the default development simulation profile; `--profile` and the existing explicit overrides work on either OS.
+
+The runner checks runtime prerequisites and ports before starting anything. It reuses `backend/.env.telemetry`, or creates it once with a restricted random credential if missing. It reads the file as data, never executes it, and passes the credential only to the backend and snapshot bridge. An existing file must contain a single line in the form `export FARADIX_DEV_TELEMETRY_TOKEN=<token>`; invalid content or protection is rejected without overwriting it.
 
 The runner uses a unique ignored run directory under `engine/run/` for its engine instance, snapshot, recording, and metadata. It waits for backend, frontend, engine snapshot, and end-to-end telemetry readiness with bounded timeouts, and labels each process's output. Open **http://127.0.0.1:5173/devices/demo-unit-001**. Press Ctrl+C to stop the processes and descendants started by this runner. If startup fails or a child exits unexpectedly, it stops its other children. It never stops an unrelated process that owns a port.
 
@@ -121,6 +138,16 @@ python3 tools/experiments.py export "$RUN_DIR" "$RUN_DIR/samples.csv"
 python3 tools/experiments.py export "$RUN_DIR" "$RUN_DIR/partial-samples.csv" --allow-incomplete
 ```
 
+In native Windows PowerShell, use the run directory printed by the runner:
+
+```powershell
+$RunDir = 'engine\run\runner-<id-printed-by-runner>'
+python tools\experiments.py inspect $RunDir
+python tools\experiments.py export $RunDir "$RunDir\samples.csv"
+# Only for an incomplete valid prefix:
+python tools\experiments.py export $RunDir "$RunDir\partial-samples.csv" --allow-incomplete
+```
+
 `inspect` reports the configuration and engine identity from metadata, engine run ID, valid sample count, simulation-time coverage, sequence gaps, run outcome, recording integrity, and validation issues. It exits nonzero for incomplete or unverified recordings. It detects malformed or unterminated final lines, mixed run IDs, duplicate or out-of-order sequences, sequence gaps, invalid timestamps, and nonfinite measurements. The valid prefix remains available after a damaged final record. `export` writes CSV columns `run_id`, `sample_sequence`, `simulation_time_s`, `measured_at_utc`, `stack_voltage_v`, `stack_current_a`, `electrolyte_temperature_c`, `source`, and `provenance`; the unit suffixes are seconds, volts, amperes, and degrees Celsius. It refuses incomplete data unless `--allow-incomplete` is explicit, never interpolates gaps, and never overwrites an existing CSV. An old profile-only metadata record without a recording is reported as unverified.
 
 For a standalone bounded experiment, choose a new path under the ignored `engine/run/` directory:
@@ -131,11 +158,13 @@ python3 tools/experiments.py inspect engine/run/manual-5-samples.jsonl
 python3 tools/experiments.py export engine/run/manual-5-samples.jsonl engine/run/manual-5-samples.csv
 ```
 
+On native Windows with the usual Visual Studio multi-configuration generator, the equivalent bounded command is `engine\build\Debug\faradix_engine.exe --steps 5 --period-ms 0 --record-jsonl engine\run\manual-5-samples.jsonl`; then run `python tools\experiments.py inspect engine\run\manual-5-samples.jsonl` and `python tools\experiments.py export engine\run\manual-5-samples.jsonl engine\run\manual-5-samples.csv`. A single-configuration Windows generator instead places the executable at `engine\build\faradix_engine.exe`. Choose new output paths for each recording and CSV export.
+
 The standalone JSONL can be inspected without runner metadata. These local recordings are development experiment artifacts, not the customer platform's planned persistent history, a validated digital twin, or evidence of physical fidelity.
 
-### Manual startup
+### Manual startup (Linux)
 
-The original four-process workflow remains available. Create the same local credential only if `backend/.env.telemetry` does not already exist:
+The original four-process Linux workflow remains available. Create the same local credential only if `backend/.env.telemetry` does not already exist:
 
 ```bash
 (set -C; umask 077; printf 'export FARADIX_DEV_TELEMETRY_TOKEN=%s\n' "$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" > backend/.env.telemetry)
@@ -176,8 +205,23 @@ To run focused development checks from the repository root:
 python3 -m unittest discover -s tools/tests -v
 (cd backend && .venv/bin/python -m pytest -q)
 (cd frontend && npm run build)
-ctest --test-dir engine/build --output-on-failure
+ctest --test-dir engine/build -C Debug --output-on-failure
 ```
+
+In native Windows PowerShell, use:
+
+```powershell
+python -m unittest discover -s tools/tests -v
+Push-Location backend
+.venv\Scripts\python.exe -m pytest -q
+Pop-Location
+Push-Location frontend
+npm run build
+Pop-Location
+ctest --test-dir engine\build -C Debug --output-on-failure
+```
+
+The [development CI workflow](.github/workflows/development-ci.yml) runs these checks plus a full telemetry, recording, inspection/export, and shutdown smoke test on native Ubuntu 24.04 and Windows Server 2022 x64 runners. It checks out into a path containing spaces. The CI job uses Python 3.12, Node.js 22, GCC 11 on Ubuntu, and Visual Studio 2022 C++ on Windows. This matrix verifies the simulated development environment only.
 
 ## Development data and access limits
 

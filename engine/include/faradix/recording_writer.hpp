@@ -26,7 +26,11 @@ private:
 
     std::filesystem::path path_;
     std::string run_id_;
+#ifdef _WIN32
+    void* descriptor_ = nullptr; // Win32 HANDLE; kept private to the output adapter.
+#else
     int descriptor_ = -1;
+#endif
     std::uint64_t sample_count_ = 0;
     std::uint64_t last_sequence_ = 0;
     bool finished_ = false;

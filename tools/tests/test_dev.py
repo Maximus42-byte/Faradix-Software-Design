@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "dev.py"
 spec = importlib.util.spec_from_file_location("faradix_dev", SCRIPT)
@@ -24,8 +25,12 @@ class RunnerTests(unittest.TestCase):
             path = Path(directory) / ".env.telemetry"
             token = "a" * 40
             original = f"export FARADIX_DEV_TELEMETRY_TOKEN={token}\n"
-            path.write_text(original)
-            path.chmod(0o600)
+            if dev.WINDOWS:
+                dev.ensure_credential(path)
+                path.write_text(original, encoding="utf-8", newline="\n")
+            else:
+                path.write_text(original)
+                path.chmod(0o600)
             before = path.stat()
             self.assertEqual(dev.ensure_credential(path), token)
             self.assertEqual(path.read_text(), original)
@@ -37,12 +42,160 @@ class RunnerTests(unittest.TestCase):
             path = Path(directory) / ".env.telemetry"
             token = dev.ensure_credential(path)
             self.assertGreaterEqual(len(token), 32)
-            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            if dev.WINDOWS:
+                dev.credential_acl(path, protect=False)
+            else:
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(dev.ensure_credential(path), token)
             path.write_text("not a credential\n")
             with self.assertRaises(dev.RunnerError):
                 dev.ensure_credential(path)
             self.assertEqual(path.read_text(), "not a credential\n")
+
+    def test_platform_executable_paths_and_tool_names(self):
+        if dev.WINDOWS:
+            self.assertEqual(dev.PYTHON.name, "python.exe")
+            self.assertEqual(dev.PYTHON.parent.name, "Scripts")
+            self.assertEqual(dev.engine_binary_path().name, "faradix_engine.exe")
+            self.assertIn(dev.engine_binary_path().parent.name, ("Debug", "build"))
+            self.assertEqual(dev.NPM, "npm.cmd")
+        else:
+            self.assertEqual(dev.PYTHON.name, "python")
+            self.assertEqual(dev.PYTHON.parent.name, "bin")
+            self.assertEqual(dev.engine_binary_path().name, "faradix_engine")
+            self.assertEqual(dev.NPM, "npm")
+
+    def test_cmake_cache_selects_exact_single_or_multi_config_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build = root / "engine" / "build"
+            build.mkdir(parents=True)
+            cache = build / "CMakeCache.txt"
+            with patch.object(dev, "ENGINE", root / "engine"), patch.object(dev, "WINDOWS", True):
+                cache.write_text("CMAKE_CONFIGURATION_TYPES:STRING=Debug;Release\n", encoding="utf-8")
+                self.assertEqual(dev.engine_binary_path(), build / "Debug" / "faradix_engine.exe")
+                cache.write_text("CMAKE_BUILD_TYPE:STRING=Debug\n", encoding="utf-8")
+                self.assertEqual(dev.engine_binary_path(), build / "faradix_engine.exe")
+
+    def test_windows_credential_acl_failure_leaves_no_token_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".env.telemetry"
+            observed = []
+
+            def fail_acl(candidate, *, protect):
+                observed.append((candidate, protect, candidate.read_bytes()))
+                raise dev.PlatformError("ACL unavailable")
+
+            with patch.object(dev, "WINDOWS", True), patch.object(dev, "credential_acl", side_effect=fail_acl):
+                with self.assertRaises(dev.PlatformError):
+                    dev.ensure_credential(path)
+            self.assertEqual(observed, [(path, True, b"")])
+            self.assertFalse(path.exists())
+
+    def test_windows_frontend_uses_node_entrypoint_without_cmd_wrapper(self):
+        with patch.object(dev, "WINDOWS", True), patch.object(dev.shutil, "which", return_value="C:/Program Files/nodejs/node.exe"):
+            command = dev.frontend_command()
+        self.assertEqual(command[0], "C:/Program Files/nodejs/node.exe")
+        self.assertEqual(Path(command[1]), dev.FRONTEND / "node_modules/vite/bin/vite.js")
+        self.assertEqual(command[2:], ["--host", dev.HOST, "--port", str(dev.FRONTEND_PORT), "--strictPort"])
+
+    def test_windows_metadata_replace_retries_transient_sharing_violation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "metadata.json"
+            path.write_text('{"version":"old"}', encoding="utf-8")
+            real_replace = os.replace
+            attempts = []
+
+            def temporarily_locked(source, destination):
+                attempts.append((source, destination))
+                if len(attempts) < 3:
+                    raise PermissionError("sharing violation")
+                real_replace(source, destination)
+
+            with patch.object(dev, "WINDOWS", True), patch.object(dev.os, "replace", side_effect=temporarily_locked):
+                dev.replace_run_metadata(path, {"version": "new"})
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"version": "new"})
+            self.assertFalse(path.with_name("metadata.json.tmp").exists())
+
+    def test_windows_credential_verification_preserves_existing_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ".env.telemetry"
+            token = "a" * 40
+            path.write_text(f"export {dev.TOKEN_NAME}={token}\n", encoding="utf-8")
+            before = path.read_bytes()
+            with patch.object(dev, "WINDOWS", True), patch.object(dev, "credential_acl") as acl:
+                self.assertEqual(dev.ensure_credential(path), token)
+            acl.assert_called_once_with(path, protect=False)
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_shutdown_path_rejects_preexisting_file_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "shutdown.request"
+            path.touch()
+            args = type("Args", (), {"shutdown_file": path})()
+            with patch.object(dev, "Child") as child, patch.object(dev, "ensure_credential") as credential:
+                with self.assertRaisesRegex(dev.RunnerError, "already exists"):
+                    dev.run(args)
+            child.assert_not_called()
+            credential.assert_not_called()
+
+    def test_stop_file_is_written_for_owned_engine_and_removed_after_shutdown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            stop_file = Path(directory) / "stop.request"
+            script = "import pathlib,sys,time; path=pathlib.Path(sys.argv[1]); " \
+                     "exec('while not path.exists(): time.sleep(0.01)'); print('stopped', flush=True)"
+            child = dev.Child("engine", [sys.executable, "-c", script, str(stop_file)],
+                              Path.cwd(), os.environ.copy())
+            try:
+                dev.stop_children([child], timeout=3, engine_stop_file=stop_file)
+                self.assertEqual(child.process.returncode, 0)
+                self.assertFalse(stop_file.exists())
+            finally:
+                if child.process.poll() is None:
+                    dev.stop_children([child])
+
+    def test_windows_refused_connect_still_checks_for_bound_nonlistener(self):
+        class Socket:
+            def __init__(self, *, bind_fails=False, connect_result=0):
+                self.bind_fails = bind_fails
+                self.connect_result = connect_result
+                self.bind_calls = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def setsockopt(self, *_args):
+                pass
+
+            def settimeout(self, _timeout):
+                pass
+
+            def bind(self, _address):
+                self.bind_calls += 1
+                if self.bind_fails:
+                    raise OSError("already bound")
+
+            def connect_ex(self, _address):
+                return self.connect_result
+
+        for ordinary_fails in (True, False):
+            with self.subTest(ordinary_fails=ordinary_fails):
+                exclusive = Socket(bind_fails=True)
+                probe = Socket(connect_result=111)
+                ordinary = Socket(bind_fails=ordinary_fails)
+                with patch.object(dev, "WINDOWS", True), \
+                     patch.object(dev.socket, "SO_EXCLUSIVEADDRUSE", 0x4, create=True), \
+                     patch.object(dev.socket, "socket", side_effect=[exclusive, probe, ordinary]):
+                    if ordinary_fails:
+                        with self.assertRaisesRegex(dev.RunnerError, "unavailable"):
+                            dev.check_port_available(8000)
+                    else:
+                        dev.check_port_available(8000)
+                self.assertEqual(ordinary.bind_calls, 1)
 
     def test_occupied_port_is_reported_without_stopping_owner(self):
         with socket.socket() as owner:

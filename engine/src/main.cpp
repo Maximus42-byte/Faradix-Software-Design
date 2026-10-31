@@ -4,6 +4,14 @@
 #include "faradix/snapshot_writer.hpp"
 
 #include <chrono>
+#include <filesystem>
+#include <system_error>
+#ifdef _WIN32
+#include <atomic>
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 #include <csignal>
 #include <cstdlib>
 #include <exception>
@@ -18,8 +26,30 @@
 
 namespace {
 
+#ifdef _WIN32
+std::atomic_bool stop_requested{false};
+BOOL WINAPI stop_handler(DWORD event) {
+    if (event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT) {
+        stop_requested.store(true, std::memory_order_relaxed);
+        return TRUE;
+    }
+    // Console close and forced process termination do not certify a clean stop.
+    return FALSE;
+}
+bool should_stop() { return stop_requested.load(std::memory_order_relaxed); }
+#else
 volatile std::sig_atomic_t stop_requested = 0;
 void stop_handler(int) { stop_requested = 1; }
+bool should_stop() { return stop_requested != 0; }
+#endif
+
+bool stop_file_requested(const std::string& path) {
+    if (path.empty()) return false;
+    std::error_code error;
+    const bool exists = std::filesystem::exists(path, error);
+    if (error) throw std::system_error(error, "Cannot check development stop request");
+    return exists;
+}
 
 struct Options {
     std::size_t steps = 0; // Zero means continuous.
@@ -28,6 +58,7 @@ struct Options {
     double baseline_drive = 0.5;
     std::string snapshot_path;
     std::string recording_path;
+    std::string stop_file_path;
 };
 
 std::string value_for(int& index, int argc, char** argv) {
@@ -42,8 +73,9 @@ Options parse_options(int argc, char** argv) {
         if (option == "--help") {
             std::cout << "Usage: faradix_engine [--steps 1..1000000] [--dt-s seconds] "
                          "[--baseline-drive 0..1] [--period-ms 0..60000] [--snapshot path] "
-                         "[--record-jsonl path]\n"
-                         "Default: continuous, 1 simulation second per step, 1 wall second between steps.\n";
+                         "[--record-jsonl path] [--stop-file path]\n"
+                         "Default: continuous, 1 simulation second per step, 1 wall second between steps.\n"
+                         "--stop-file requests a clean stop when the path appears.\n";
             std::exit(0);
         }
         if (option == "--steps") {
@@ -70,12 +102,20 @@ Options parse_options(int argc, char** argv) {
         } else if (option == "--record-jsonl") {
             options.recording_path = value_for(index, argc, argv);
             if (options.recording_path.empty()) throw std::invalid_argument("Invalid --record-jsonl path");
+        } else if (option == "--stop-file") {
+            options.stop_file_path = value_for(index, argc, argv);
+            if (options.stop_file_path.empty()) throw std::invalid_argument("Invalid --stop-file path");
         } else {
             throw std::invalid_argument("Unknown option: " + option);
         }
     }
     if (options.steps == 0 && options.period_ms == 0) {
         throw std::invalid_argument("Continuous mode requires a positive wall period");
+    }
+    if (!options.stop_file_path.empty() &&
+        (options.stop_file_path == options.snapshot_path ||
+         options.stop_file_path == options.recording_path)) {
+        throw std::invalid_argument("--stop-file must differ from output paths");
     }
     return options;
 }
@@ -109,14 +149,22 @@ int main(int argc, char** argv) {
                 return 3;
             }
         }
+#ifdef _WIN32
+        if (!SetConsoleCtrlHandler(stop_handler, TRUE)) {
+            // Headless runners can still request a clean stop through --stop-file.
+            std::cerr << "Windows console stop handler unavailable; use --stop-file for graceful stop.\n";
+        }
+#else
         std::signal(SIGINT, stop_handler);
         std::signal(SIGTERM, stop_handler);
+#endif
         std::cout << "Uncalibrated development simulation; no physical operating limits or hard real-time guarantee.\n"
                   << "run_id=" << run_id << " dt_s=" << options.step_seconds
                   << " baseline_drive=" << options.baseline_drive << '\n';
         auto next_wall_tick = std::chrono::steady_clock::now();
         std::size_t executed = 0;
-        while (!stop_requested && (options.steps == 0 || executed < options.steps)) {
+        while (!should_stop() && !stop_file_requested(options.stop_file_path) &&
+               (options.steps == 0 || executed < options.steps)) {
             const auto result = engine.step();
             const auto measured_at = std::chrono::system_clock::now();
             if (recorder) {
@@ -145,8 +193,8 @@ int main(int argc, char** argv) {
             ++executed;
             if (options.period_ms > 0 && (options.steps == 0 || executed < options.steps)) {
                 next_wall_tick += std::chrono::milliseconds(options.period_ms);
-                // Check signals during the wait so a long wall period does not delay shutdown.
-                while (!stop_requested) {
+                // Check stop requests during the wait so a long wall period does not delay shutdown.
+                while (!should_stop() && !stop_file_requested(options.stop_file_path)) {
                     const auto now = std::chrono::steady_clock::now();
                     if (now >= next_wall_tick) break;
                     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(next_wall_tick - now);

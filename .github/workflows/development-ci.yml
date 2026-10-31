@@ -1,0 +1,123 @@
+name: Development CI
+
+on:
+  push:
+    branches: [main, feature/linux-windows-development]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-development:
+    name: Native development (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    defaults:
+      run:
+        shell: bash
+        working-directory: Faradix Software Design
+
+    steps:
+      - name: Check out into a path with spaces
+        uses: actions/checkout@v7.0.1
+        with:
+          path: Faradix Software Design
+          persist-credentials: false
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Install Ubuntu C++ build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++-11
+          cmake --version
+          g++-11 --version
+
+      - name: Verify Windows CMake and VS 2022 C++ tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $cmakeLine = (& cmake --version | Select-Object -First 1)
+          $match = [regex]::Match($cmakeLine, 'cmake version (\d+\.\d+\.\d+)')
+          if (-not $match.Success) {
+            throw "Cannot determine CMake version: $cmakeLine"
+          }
+          $cmakeVersion = [version]$match.Groups[1].Value
+          if ($cmakeVersion -lt [version]'3.22.0') {
+            throw "CMake 3.22+ is required; found $cmakeVersion"
+          }
+          $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+          $vswhere = Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path $vswhere)) {
+            throw 'VSWhere is missing; cannot verify the Visual Studio C++ toolchain'
+          }
+          $vs = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) {
+            throw 'Visual Studio 2022 with x64/x86 C++ tools is required'
+          }
+          Write-Host "CMake $cmakeVersion; Visual Studio C++ tools at $vs"
+
+      - name: Create backend environment and install locked dependencies
+        run: |
+          python -m venv backend/.venv
+          if [[ "$RUNNER_OS" == 'Windows' ]]; then
+            backend/.venv/Scripts/python.exe -m pip install -r backend/requirements-dev.txt
+          else
+            backend/.venv/bin/python -m pip install -r backend/requirements-dev.txt
+          fi
+
+      - name: Install frontend dependencies from lockfile
+        working-directory: Faradix Software Design/frontend
+        run: npm ci
+
+      - name: Build the native C++ engine with the development runner (Linux)
+        if: runner.os == 'Linux'
+        run: python tools/dev.py build
+
+      - name: Build native x64 C++ engine with the development runner (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CMAKE_GENERATOR: Visual Studio 17 2022
+          CMAKE_GENERATOR_PLATFORM: x64
+        run: python tools/dev.py build
+
+      - name: Run C++ tests against the new build
+        run: ctest --test-dir engine/build -C Debug --output-on-failure --no-tests=error
+
+      - name: Run backend tests
+        run: |
+          cd backend
+          if [[ "$RUNNER_OS" == 'Windows' ]]; then
+            .venv/Scripts/python.exe -m pytest -q
+          else
+            .venv/bin/python -m pytest -q
+          fi
+
+      - name: Build customer web application
+        working-directory: Faradix Software Design/frontend
+        run: npm run build
+
+      - name: Run development runner and experiment tests
+        run: python -m unittest discover -s tools/tests -v
+
+      - name: Check development runner prerequisites
+        run: python tools/dev.py check
+
+      - name: Exercise full simulated engine-to-panel path
+        run: python .github/scripts/ci_runner_smoke.py

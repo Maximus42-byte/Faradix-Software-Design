@@ -1,22 +1,35 @@
+#ifdef NDEBUG
+#undef NDEBUG // Keep the standalone assertions active in Release and multi-config CTest.
+#endif
+#include <cassert>
+
 #include "faradix/engine.hpp"
 #include "faradix/recording_writer.hpp"
+#include "faradix/snapshot_writer.hpp"
 #include "faradix/simulated_device.hpp"
 
-#include <cassert>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <vector>
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -87,9 +100,38 @@ void bounded_steps() {
     assert(rejected_config);
 }
 
+void repeated_snapshot_replacement() {
+    const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto path = std::filesystem::temp_directory_path() / ("faradix snapshot " + unique + ".json");
+    faradix::SimulatedDevice device;
+    faradix::Engine engine(device, {0.5, 0.2});
+    faradix::SnapshotWriter writer(path, "snapshot-test");
+    const auto epoch = std::chrono::system_clock::time_point{std::chrono::seconds(1700000000)};
+    writer.write(engine.step().state, epoch);
+#ifdef _WIN32
+    // A reader without delete sharing briefly holds the old snapshot.
+    // The adapter must retry replacement without deleting that file first.
+    const HANDLE reader = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                      nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    assert(reader != INVALID_HANDLE_VALUE);
+    std::jthread release_reader([reader] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        CloseHandle(reader);
+    });
+#endif
+    writer.write(engine.step().state, epoch + std::chrono::seconds(1));
+    std::ifstream input(path);
+    const std::string json((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    assert(json.find("\"sample_sequence\":2") != std::string::npos);
+    assert(json.find("\"sample_sequence\":1") == std::string::npos);
+    assert(json.find("2023-11-14T22:13:21.000000Z") != std::string::npos);
+    input.close();
+    std::filesystem::remove(path);
+}
+
 void bounded_recording_and_incomplete_prefix() {
     const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-    const auto path = std::filesystem::temp_directory_path() / ("faradix-recording-" + unique + ".jsonl");
+    const auto path = std::filesystem::temp_directory_path() / ("faradix recording " + unique + ".jsonl");
     faradix::SimulatedDevice device;
     faradix::Engine engine(device, {0.5, 0.2});
     const auto epoch = std::chrono::system_clock::time_point{std::chrono::seconds(1700000000)};
@@ -113,6 +155,7 @@ void bounded_recording_and_incomplete_prefix() {
         assert(line.find("\"stack_current_a\":") != std::string::npos);
         assert(line.find("\"electrolyte_temperature_c\":") != std::string::npos);
         assert(line.find("Z\",\"source\"") != std::string::npos);
+        if (index == 0) assert(line.find("2023-11-14T22:13:21.000000Z") != std::string::npos);
     }
     assert(lines.back() ==
         "{\"record_version\":\"1\",\"record_type\":\"completion\",\"run_id\":\"test-run\","
@@ -121,6 +164,7 @@ void bounded_recording_and_incomplete_prefix() {
     try { faradix::RecordingWriter duplicate(path, "test-run"); }
     catch (const std::system_error&) { exclusive_open_rejected = true; }
     assert(exclusive_open_rejected);
+    input.close();
     std::filesystem::remove(path);
 
     const auto partial_path = std::filesystem::temp_directory_path() / ("faradix-partial-" + unique + ".jsonl");
@@ -136,9 +180,11 @@ void bounded_recording_and_incomplete_prefix() {
     assert(static_cast<bool>(std::getline(partial_input, partial_line)));
     assert(partial_line.find("\"record_type\":\"sample\"") != std::string::npos);
     assert(!static_cast<bool>(std::getline(partial_input, partial_line)));
+    partial_input.close();
     std::filesystem::remove(partial_path);
 }
 
+#ifndef _WIN32
 void recording_write_error_preserves_valid_prefix() {
     const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     const auto path = std::filesystem::temp_directory_path() / ("faradix-write-error-" + unique + ".jsonl");
@@ -174,8 +220,47 @@ void recording_write_error_preserves_valid_prefix() {
     assert(static_cast<bool>(std::getline(input, line)));
     assert(line.find("\"record_type\":\"sample\"") != std::string::npos);
     assert(!static_cast<bool>(std::getline(input, line)));
+    input.close();
     std::filesystem::remove(path);
 }
+#else
+void recording_write_error_preserves_valid_prefix() {
+    const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto path = std::filesystem::temp_directory_path() / ("faradix write error " + unique + ".jsonl");
+    const auto epoch = std::chrono::system_clock::time_point{std::chrono::seconds(1700000000)};
+    faradix::SimulatedDevice device;
+    faradix::Engine engine(device, {0.5, 0.2});
+    {
+        faradix::RecordingWriter recorder(path, "write-error-test");
+        recorder.write(engine.step().state, epoch);
+        const auto offset = std::filesystem::file_size(path);
+        const HANDLE reader = CreateFileW(path.c_str(), GENERIC_READ,
+                                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        assert(reader != INVALID_HANDLE_VALUE);
+        OVERLAPPED range{};
+        range.Offset = static_cast<DWORD>(offset & 0xffffffffULL);
+        range.OffsetHigh = static_cast<DWORD>(offset >> 32);
+        assert(LockFileEx(reader, LOCKFILE_FAIL_IMMEDIATELY, 0, 4096, 0, &range));
+        bool rejected = false;
+        try {
+            recorder.write(engine.step().state, epoch + std::chrono::seconds(1));
+        } catch (const std::system_error& error) {
+            rejected = error.code().value() == ERROR_LOCK_VIOLATION;
+        }
+        assert(rejected);
+        assert(UnlockFileEx(reader, 0, 4096, 0, &range));
+        assert(CloseHandle(reader));
+    }
+    std::ifstream input(path);
+    std::string line;
+    assert(static_cast<bool>(std::getline(input, line)));
+    assert(line.find("\"record_type\":\"sample\"") != std::string::npos);
+    assert(!static_cast<bool>(std::getline(input, line)));
+    input.close();
+    std::filesystem::remove(path);
+}
+#endif
 
 } // namespace
 
@@ -183,6 +268,7 @@ int main() {
     deterministic_simulation();
     command_admission_and_device_boundary();
     bounded_steps();
+    repeated_snapshot_replacement();
     bounded_recording_and_incomplete_prefix();
     recording_write_error_preserves_valid_prefix();
 }
