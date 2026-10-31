@@ -156,7 +156,7 @@ class ProfileTests(unittest.TestCase):
                 "dt_s": float(flag_values["--dt-s"]),
                 "period_ms": int(flag_values["--period-ms"]),
             })
-            self.assertEqual(Path(metadata["profile"]["path"]), path)
+            self.assertEqual(Path(metadata["profile"]["path"]).resolve(), path.resolve())
             self.assertEqual(metadata["profile"]["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
             self.assertEqual(metadata["engine"]["sha256"], "a" * 64)
             encoded = json.dumps(metadata)
@@ -202,8 +202,8 @@ class ProfileTests(unittest.TestCase):
                     absolute_selection = dev.load_profile(profile_path)
             finally:
                 os.chdir(previous_cwd)
-            self.assertEqual(Path(relative_selection.path), profile_path)
-            self.assertEqual(Path(absolute_selection.path), profile_path)
+            self.assertEqual(Path(relative_selection.path).resolve(), profile_path.resolve())
+            self.assertEqual(Path(absolute_selection.path).resolve(), profile_path.resolve())
             self.assertEqual(relative_selection.sha256, absolute_selection.sha256)
 
 

@@ -244,7 +244,7 @@ class RunnerTests(unittest.TestCase):
         child = dev.Child("failing", [sys.executable, "-c", "raise SystemExit(7)"],
                           Path.cwd(), os.environ.copy())
         try:
-            with self.assertRaisesRegex(dev.RunnerError, "failing exited during startup \(status 7\)"):
+            with self.assertRaisesRegex(dev.RunnerError, r"failing exited during startup \(status 7\)"):
                 dev.wait_ready("never ready", lambda: False, [child], timeout=2)
         finally:
             dev.stop_children([child])
